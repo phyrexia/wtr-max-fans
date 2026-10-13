@@ -223,7 +223,7 @@ Los ventiladores PWM tienen cuatro pines. La calibración prueba cada canal: com
 DKMS recompila el driver para el nuevo kernel si están instaladas sus cabeceras. Tras una actualización del kernel, ejecuta `sudo wtr-max-fans check`. Si el kernel en uso no tiene módulo, los ventiladores vuelven a la curva del firmware. La guardia registra una alerta y envía un correo a root una vez por arranque.
 
 **¿Hacia dónde soplan los ventiladores?**
-Los ventiladores traseros expulsan aire fuera del chasis. En los ventiladores Noctua, el lado con la etiqueta es la salida de aire. Consulta las [preguntas frecuentes de Noctua](https://noctua.at/en/faq) para más detalles sobre la orientación.
+Los ventiladores traseros expulsan aire fuera del chasis. En los ventiladores Noctua, el lado con la etiqueta es la salida de aire. Consulta las [preguntas frecuentes de Noctua](https://www.noctua.at/en/support/faqs/how-do-i-determine-my-fans-airflow-direction) para más detalles sobre la orientación.
 
 **¿Y la presión positiva?**
 Este software no controla la presión. El chasis está pensado para tomar aire por el frente, pasarlo por los discos y expulsarlo por los ventiladores traseros. Deja los ventiladores como están instalados; no hace falta darles la vuelta.

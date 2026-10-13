@@ -222,7 +222,7 @@ PWM fans have four pins. The calibration tests each channel: it checks that the 
 DKMS rebuilds the driver for the new kernel when the kernel headers are installed. After a kernel update, run `sudo wtr-max-fans check`. If the running kernel has no module, the fans go back to the firmware curve. The guard then logs an alert and mails root once per boot.
 
 **Which way do the fans blow?**
-The rear fans exhaust air out of the chassis. On Noctua fans, the side with the label is the air outlet. See [Noctua's FAQ](https://noctua.at/en/faq) for orientation details.
+The rear fans exhaust air out of the chassis. On Noctua fans, the side with the label is the air outlet. See [Noctua's FAQ](https://www.noctua.at/en/support/faqs/how-do-i-determine-my-fans-airflow-direction) for orientation details.
 
 **What about positive pressure?**
 This software does not control pressure. This chassis is meant to draw air from the front, across the disks, and out through the rear fans. Keep the fans as installed; you do not need to turn them around.
