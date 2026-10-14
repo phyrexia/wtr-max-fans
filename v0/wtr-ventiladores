@@ -1,0 +1,1078 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Gabriel González Pineda <https://github.com/phyrexia>
+# SPDX-License-Identifier: Apache-2.0
+"""Ventiladores SYS (pwm3) y SATA (pwm5) del WTR MAX según la temperatura de los discos.
+
+Modo híbrido: los dos canales del IT8613E siguen en automático (pwmN_enable=2) con la curva del
+chip aplanada (Off 0 °C, Start 0 °C, Full 80 °C, pendiente 0). Este programa sólo ajusta el Start
+PWM (pwmN_auto_start) según la temperatura SMART máxima de los HDD. Nunca escribe pwmN ni
+pwmN_enable 0/1. Si muere, el chip sigue en automático con el último Start PWM, y ExecStopPost
+deja el respaldo (SATA 153, SYS 77).
+
+No escribe en ningún canal si falta pwmN_auto_start en cualquiera de los dos (DKMS sin el parche
+local) ni mientras el escalón de la guardia esté vigente (/run/wtr-guardia-discos/escalon con
+mtime < 90 s).
+
+De noche (21:00-09:00, 10:00 fines de semana y festivos) cada canal sigue una curva estrictamente
+por debajo de la diurna hasta T_CONVERGE_C, con piso (PISO_NOCHE_*) y nivel en T_SILENCIO_C
+(NOCHE_*) propios; desde T_CONVERGE_C coinciden. «Noche = día» en el .conf es un error de
+configuración (la curva vuelve a fábrica, config_ok=0): para no tener noche, MODO=dia. Una bajada
+pendiente, por pequeña que sea, se completa tras CICLOS_CONVERGENCIA ciclos con el objetivo por
+debajo del aplicado.
+
+Uso:
+  wtr-ventiladores correr [--simular]     bucle del servicio (Type=notify); --simular no escribe
+  wtr-ventiladores respaldo [--simular]   ExecStopPost: SATA 153 / SYS 77, en automático
+  wtr-ventiladores estado                 configuración, modo, sysfs y discos
+  wtr-ventiladores decidir [--en FECHA]   sólo el modo (día/noche) para un instante
+  wtr-ventiladores calibrar --canal pwm5|pwm3 --pwm N [--minutos 3]
+  wtr-ventiladores bios                   Start temp 20 °C y Start PWM 100 (instalar.sh revertir --bios)
+
+Configuración: /etc/wtr-ventiladores.conf (se relee en cada ciclo). Documentación: README del
+repositorio wtr-max-fans (https://github.com/phyrexia/wtr-max-fans).
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import glob
+import json
+import math
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+# --- calendario: fijo en v0 (hora de Madrid, festivos de Madrid) --------------------------------
+# Para otra zona horaria hay que editar ZONA; los festivos se leen de festivos-madrid.txt. Ver
+# «Limitaciones» en el README del repositorio wtr-max-fans.
+ZONA = ZoneInfo("Europe/Madrid")
+INICIO_NOCHE = dt.time(21, 0)
+FIN_LABORABLE = dt.time(9, 0)
+FIN_FESTIVO = dt.time(10, 0)
+
+
+@dataclass
+class Festivos:
+    fechas: frozenset[dt.date]
+    anios: frozenset[int]
+
+
+def leer_festivos(ruta: Path) -> Festivos | None:
+    """Formato: `# cubre: 2026 2027` y una línea `AAAA-MM-DD nombre` por festivo.
+
+    Devuelve None si el archivo falta o no es coherente (año sin cubrir, cubierto sin fechas,
+    fecha inválida): quien llama lo trata como «no se puede decidir».
+    """
+    try:
+        texto = ruta.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    anios: set[int] | None = None
+    fechas: set[dt.date] = set()
+    for linea in texto.splitlines():
+        s = linea.strip()
+        m = re.fullmatch(r"#\s*cubre:\s*((?:\d{4}\s*)+)", s)
+        if m:
+            if anios is not None:
+                return None
+            anios = {int(a) for a in m.group(1).split()}
+            continue
+        if not s or s.startswith("#"):
+            continue
+        m = re.match(r"(\d{4}-\d{2}-\d{2})(?:\s|$)", s)
+        if not m:
+            return None
+        try:
+            fechas.add(dt.date.fromisoformat(m.group(1)))
+        except ValueError:
+            return None
+    if not anios:
+        return None
+    if any(f.year not in anios for f in fechas):
+        return None
+    if any(not any(f.year == a for f in fechas) for a in anios):
+        return None
+    return Festivos(frozenset(fechas), frozenset(anios))
+
+
+# --- decisión -----------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Decision:
+    perfil: str
+    motivo: str
+    festivos_cubiertos: bool
+
+
+def decidir(ahora: dt.datetime, festivos: Festivos | None, perfil_diurno: str) -> Decision:
+    """Perfil para el instante `ahora` (con zona horaria). Función pura: la prueban los tests."""
+    if ahora.tzinfo is None:
+        raise ValueError("ahora debe llevar zona horaria")
+    local = ahora.astimezone(ZONA)
+    hoy, hora = local.date(), local.time()
+    cubiertos = festivos is not None and hoy.year in festivos.anios
+    if hora >= INICIO_NOCHE:
+        return Decision("quiet", "noche", cubiertos)
+    if hoy.weekday() >= 5:
+        fin, tipo = FIN_FESTIVO, "fin de semana"
+    elif not cubiertos:
+        fin, tipo = FIN_FESTIVO, "festivos sin cubrir: se asume festivo"
+    elif hoy in festivos.fechas:
+        fin, tipo = FIN_FESTIVO, "festivo"
+    else:
+        fin, tipo = FIN_LABORABLE, "laborable"
+    if hora < fin:
+        return Decision("quiet", f"madrugada, {tipo} (hasta las {fin:%H:%M})", cubiertos)
+    return Decision(perfil_diurno, f"día, {tipo}", cubiertos)
+
+
+# --- fin del bloque copiado ----------------------------------------------------------------------
+
+CONF = Path(os.environ.get("WTR_VENT_CONF", "/etc/wtr-ventiladores.conf"))
+FESTIVOS = Path(os.environ.get("WTR_VENT_FESTIVOS", "/usr/local/share/wtr-ventiladores/festivos-madrid.txt"))
+HWMON_GLOB = os.environ.get("WTR_VENT_HWMON", "/sys/devices/platform/it87.2608/hwmon/hwmon*")
+METRICA = Path(os.environ.get("WTR_VENT_METRICA", "/var/lib/prometheus/node-exporter/wtr_ventiladores.prom"))
+RUN = Path(os.environ.get("WTR_VENT_RUN", "/run/wtr-ventiladores"))
+ESCALON = Path(os.environ.get("WTR_VENT_ESCALON", "/run/wtr-guardia-discos/escalon"))
+BYID = Path(os.environ.get("WTR_VENT_BYID", "/dev/disk/by-id"))
+SMARTCTL = os.environ.get("WTR_VENT_SMARTCTL", "smartctl")
+LSBLK = os.environ.get("WTR_VENT_LSBLK", "lsblk")
+SYSTEMCTL = os.environ.get("WTR_VENT_SYSTEMCTL", "systemctl")
+
+CHIP = "it8613"
+SERVICIO = "wtr-ventiladores.service"
+ESCALON_VIGENCIA_S = 90
+SMARTCTL_TIMEOUT_S = 20
+FALLOS_TOLERADOS = 5      # desde el sexto fallo seguido, wtr_disco_lectura_ok=0
+CICLOS_CIEGO = 3          # ciclos seguidos sin ningún disco legible -> 255
+CICLOS_PARADO = 3         # ciclos con fanN_input == 0 -> el otro canal a 255
+PWM_MINIMO = 51           # 20 %: por debajo, el comportamiento de los Noctua no está definido
+MAXIMO = 255
+SALIR_SIN_DRIVER = 78
+
+# Canal -> (ventilador según la BIOS, tacómetro, sufijo de configuración, el otro canal).
+CANALES = {
+    "pwm3": ("sys", "fan3", "SYS", "pwm5"),
+    "pwm5": ("sata", "fan5", "SATA", "pwm3"),
+}
+ESTADOS = ("ok", "ciego", "sin_driver", "ventilador_parado", "error_escritura", "simulando")
+# Curva del chip que deja `preparar`, en el orden que se escribe (Off <= Start <= Full).
+CURVA_CHIP = (("auto_point1_temp", 0), ("auto_point2_temp", 0), ("auto_point3_temp", 80000),
+              ("auto_slope", 0))
+
+
+def log(msg: str) -> None:
+    print(f"wtr-ventiladores: {msg}", flush=True)
+
+
+# --- configuración -------------------------------------------------------------------------------
+
+DEFECTO = {
+    "MODO": "auto", "CICLO_S": 60,
+    "T_PISO_C": 38, "T_SILENCIO_C": 46, "T_CONVERGE_C": 50, "T_MAX_C": 52,
+    "PASO_SUBIDA": 20, "PASO_BAJADA": 4, "BANDA_MUERTA": 6, "CICLOS_BAJADA": 3, "CICLOS_CONVERGENCIA": 10,
+    "PISO_SATA": 115, "SILENCIO_SATA": 153, "PISO_NOCHE_SATA": 89, "NOCHE_SATA": 128, "RESPALDO_SATA": 153,
+    "PISO_SYS": 77, "SILENCIO_SYS": 100, "PISO_NOCHE_SYS": 64, "NOCHE_SYS": 77, "RESPALDO_SYS": 77,
+    "DISCOS": "",
+}
+RANGOS = {
+    "CICLO_S": (10, 120), "T_PISO_C": (20, 70), "T_SILENCIO_C": (20, 70), "T_CONVERGE_C": (20, 70),
+    "T_MAX_C": (20, 70), "PASO_SUBIDA": (1, 255), "PASO_BAJADA": (1, 255), "BANDA_MUERTA": (0, 60),
+    "CICLOS_BAJADA": (1, 60), "CICLOS_CONVERGENCIA": (1, 60),
+}
+for _s in ("SATA", "SYS"):
+    for _p in ("PISO", "SILENCIO", "PISO_NOCHE", "NOCHE", "RESPALDO"):
+        RANGOS[f"{_p}_{_s}"] = (PWM_MINIMO, MAXIMO)
+CURVA = ("T_PISO_C", "T_SILENCIO_C", "T_CONVERGE_C", "T_MAX_C") + tuple(
+    f"{p}_{s}" for s in ("SATA", "SYS") for p in ("PISO", "SILENCIO", "PISO_NOCHE", "NOCHE", "RESPALDO"))
+
+
+@dataclass
+class Config:
+    valores: dict = field(default_factory=lambda: dict(DEFECTO))
+    ok: bool = True
+    errores: tuple[str, ...] = ()
+
+    def __getitem__(self, clave: str):
+        return self.valores[clave]
+
+    def canal(self, c: str, parametro: str) -> int:
+        return self.valores[f"{parametro}_{CANALES[c][2]}"]
+
+    @property
+    def discos(self) -> list[str]:
+        return self.valores["DISCOS"].split()
+
+
+def _coherencia(v: dict) -> tuple[list[str], list[str]]:
+    """(incoherencias de la curva, incoherencias de los ciclos): invariantes 1-4 y 5 de la enmienda
+    rev. 5.1 §2.1. La noche va estrictamente por debajo del día; noche = día es un error."""
+    de_curva, de_ciclos = [], []
+    if not v["T_PISO_C"] < v["T_SILENCIO_C"] < v["T_CONVERGE_C"] <= v["T_MAX_C"]:
+        de_curva.append("se exige T_PISO_C < T_SILENCIO_C < T_CONVERGE_C <= T_MAX_C")
+    for s in ("SATA", "SYS"):
+        if not PWM_MINIMO <= v[f"PISO_NOCHE_{s}"] < v[f"PISO_{s}"] <= v[f"SILENCIO_{s}"]:
+            de_curva.append(f"se exige {PWM_MINIMO} <= PISO_NOCHE_{s} < PISO_{s} <= SILENCIO_{s} "
+                            "(para no tener curva nocturna usa MODO=dia)")
+        if not v[f"PISO_NOCHE_{s}"] <= v[f"NOCHE_{s}"] < v[f"SILENCIO_{s}"]:
+            de_curva.append(f"se exige PISO_NOCHE_{s} <= NOCHE_{s} < SILENCIO_{s} "
+                            "(para no tener curva nocturna usa MODO=dia)")
+        if v[f"RESPALDO_{s}"] < v[f"PISO_{s}"]:
+            de_curva.append(f"se exige RESPALDO_{s} >= PISO_{s}")
+    if v["CICLOS_CONVERGENCIA"] < v["CICLOS_BAJADA"]:
+        de_ciclos.append("se exige CICLOS_CONVERGENCIA >= CICLOS_BAJADA")
+    return de_curva, de_ciclos
+
+
+def leer_config(ruta: Path) -> Config:
+    """CLAVE=valor por línea, `#` comenta. Un valor inválido usa el de fábrica y marca ok=False;
+    una clave ausente usa el de fábrica sin error.
+
+    Si la curva resultante no es coherente (temperaturas no crecientes, noche no estrictamente por
+    debajo del día, respaldo bajo el piso), todos los parámetros de la curva vuelven a los de
+    fábrica; si CICLOS_CONVERGENCIA < CICLOS_BAJADA, sólo esos dos vuelven.
+    """
+    cfg = Config()
+    errores: list[str] = []
+    try:
+        lineas = ruta.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return cfg
+    except (OSError, UnicodeDecodeError) as e:
+        return Config(ok=False, errores=(f"no se pudo leer {ruta}: {e}",))
+    for n, linea in enumerate(lineas, 1):
+        linea = linea.split("#", 1)[0].strip()
+        if not linea:
+            continue
+        clave, sep, valor = linea.partition("=")
+        clave, valor = clave.strip(), valor.strip().strip('"').strip("'")
+        if not sep:
+            errores.append(f"línea {n}: falta '='")
+        elif clave not in DEFECTO:
+            errores.append(f"línea {n}: clave desconocida {clave!r}")
+        elif clave == "MODO":
+            if valor in ("auto", "dia", "noche"):
+                cfg.valores[clave] = valor
+            else:
+                errores.append(f"línea {n}: MODO={valor!r} no es auto, dia ni noche")
+        elif clave == "DISCOS":
+            rutas = valor.split()
+            if all(re.fullmatch(r"/dev/[A-Za-z0-9._:/-]+", r) and ".." not in r for r in rutas):
+                cfg.valores[clave] = " ".join(rutas)
+            else:
+                errores.append(f"línea {n}: DISCOS debe ser una lista de rutas /dev/...")
+        else:
+            minimo, maximo = RANGOS[clave]
+            if re.fullmatch(r"\d{1,3}", valor) and minimo <= int(valor) <= maximo:
+                cfg.valores[clave] = int(valor)
+            else:
+                errores.append(f"línea {n}: {clave}={valor!r} no es un entero entre {minimo} y {maximo}")
+    incoherencias, ciclos = _coherencia(cfg.valores)
+    if incoherencias:
+        errores += [f"{e}: la curva vuelve a los valores de fábrica" for e in incoherencias]
+        for clave in CURVA:
+            cfg.valores[clave] = DEFECTO[clave]
+    if ciclos:
+        errores += [f"{e}: CICLOS_BAJADA y CICLOS_CONVERGENCIA vuelven a los de fábrica" for e in ciclos]
+        for clave in ("CICLOS_BAJADA", "CICLOS_CONVERGENCIA"):
+            cfg.valores[clave] = DEFECTO[clave]
+    cfg.ok = not errores
+    cfg.errores = tuple(errores)
+    return cfg
+
+
+# --- modo día / noche ----------------------------------------------------------------------------
+
+def decidir_modo(cfg: Config, ahora: dt.datetime) -> tuple[str, str, bool]:
+    """(modo, motivo, festivos_cubiertos). El calendario de arriba: «quiet» = noche.
+
+    Cualquier error (lista ilegible incluida, que decidir() ya trata como festivo) cae en noche.
+    """
+    try:
+        festivos = leer_festivos(FESTIVOS)
+    except Exception:  # noqa: BLE001 - p. ej. UnicodeDecodeError: lista ilegible = sin lista (festiva)
+        festivos = None
+    if cfg["MODO"] != "auto":
+        cubiertos = festivos is not None and ahora.astimezone(ZONA).year in festivos.anios
+        return cfg["MODO"], f"forzado por MODO={cfg['MODO']}", cubiertos
+    try:
+        d = decidir(ahora, festivos, "dia")
+    except Exception as e:  # noqa: BLE001 - sin decisión posible, falla hacia la noche
+        return "noche", f"error al decidir ({e}): noche", False
+    return ("noche" if d.perfil == "quiet" else "dia"), d.motivo, d.festivos_cubiertos
+
+
+# --- curva y suavizado ---------------------------------------------------------------------------
+
+def _lineal(t: float, t0: float, t1: float, p0: float, p1: float) -> float:
+    return p0 + (t - t0) * (p1 - p0) / (t1 - t0)
+
+
+def _redondear(x: float) -> int:
+    return int(math.floor(x + 0.5))
+
+
+def curva(t: float, c: str, noche: bool, cfg: Config) -> int:
+    """PWM objetivo del canal `c` para la temperatura máxima `t` (spec §3.2; enmienda rev. 5.1 §2.2:
+    de noche el piso es PISO_NOCHE_c)."""
+    t_piso, t_sil, t_conv, t_max = (cfg["T_PISO_C"], cfg["T_SILENCIO_C"], cfg["T_CONVERGE_C"],
+                                    cfg["T_MAX_C"])
+    silencio, noche_c = cfg.canal(c, "SILENCIO"), cfg.canal(c, "NOCHE")
+    piso = cfg.canal(c, "PISO_NOCHE" if noche else "PISO")
+    alto = noche_c if noche else silencio
+    dia_conv = _lineal(t_conv, t_sil, t_max, silencio, MAXIMO)
+    if t <= t_piso:
+        return piso
+    if t <= t_sil:
+        return _redondear(_lineal(t, t_piso, t_sil, piso, alto))
+    if noche and t <= t_conv:
+        return _redondear(_lineal(t, t_sil, t_conv, noche_c, dia_conv))
+    if t <= t_max:
+        return _redondear(_lineal(t, t_sil, t_max, silencio, MAXIMO))
+    return MAXIMO
+
+
+def suavizar(objetivo: int, actual: int, ciclos_bajo: int, cfg: Config) -> tuple[int, int]:
+    """(aplicado, ciclos_bajo). Sube como mucho PASO_SUBIDA por ciclo salvo si el objetivo es 255.
+    Con el objetivo por debajo cuenta ciclos seguidos y baja PASO_BAJADA por ciclo tras CICLOS_BAJADA
+    ciclos si el hueco es de BANDA_MUERTA o más, o tras CICLOS_CONVERGENCIA ciclos con cualquier hueco
+    (enmienda rev. 5.1 §3, D13). Una bajada que empezó sigue hasta el objetivo; el contador vuelve a 0
+    en cualquier ciclo con objetivo >= aplicado.
+    """
+    if objetivo > actual:
+        return (objetivo if objetivo == MAXIMO else min(objetivo, actual + cfg["PASO_SUBIDA"])), 0
+    if objetivo == actual:
+        return actual, 0
+    ciclos_bajo += 1
+    if ((actual - objetivo >= cfg["BANDA_MUERTA"] and ciclos_bajo >= cfg["CICLOS_BAJADA"])
+            or ciclos_bajo >= cfg["CICLOS_CONVERGENCIA"]):
+        return max(objetivo, actual - cfg["PASO_BAJADA"]), max(ciclos_bajo, cfg["CICLOS_CONVERGENCIA"])
+    return actual, ciclos_bajo
+
+
+# --- discos --------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Disco:
+    id: str      # nombre en /dev/disk/by-id (ata-...) o, si no tiene, el del dispositivo
+    dev: str     # sdX
+    ruta: str    # lo que recibe smartctl
+    modelo: str = ""
+
+
+@dataclass(frozen=True)
+class Lectura:
+    tipo: str            # ok | standby | fallo
+    temp: int | None = None
+    motivo: str = ""
+
+
+def descubrir_discos(cfg: Config) -> list[Disco]:
+    """HDD ATA rotacionales (lsblk), con su nombre estable de /dev/disk/by-id. DISCOS= lo fija."""
+    if cfg.discos:
+        return [Disco(Path(r).name, Path(os.path.realpath(r)).name, r) for r in cfg.discos]
+    r = subprocess.run([LSBLK, "-J", "-d", "-o", "NAME,ROTA,TRAN,MODEL"], capture_output=True,
+                       text=True, timeout=10, check=True)
+    bloques = json.loads(r.stdout).get("blockdevices", [])
+    porid: dict[str, Path] = {}
+    for p in sorted(BYID.glob("ata-*")):
+        if "-part" not in p.name:
+            porid.setdefault(Path(os.path.realpath(p)).name, p)
+    discos = []
+    for b in bloques:
+        nombre, rota, tran = b.get("name"), b.get("rota"), b.get("tran")
+        if not isinstance(nombre, str) or not re.fullmatch(r"[a-z0-9]+", nombre):
+            continue
+        if rota not in (True, 1, "1") or tran not in ("sata", "ata"):
+            continue
+        modelo = b.get("model") if isinstance(b.get("model"), str) else ""
+        ruta = porid.get(nombre)
+        discos.append(Disco(ruta.name if ruta else nombre, nombre, str(ruta or f"/dev/{nombre}"),
+                            modelo.strip()))
+    return discos
+
+
+def interpretar_smartctl(salida: str, rc: int) -> Lectura:
+    """Sólo temperature.current. Standby = bit 1 sin tabla de atributos y power_mode STANDBY/SLEEP
+    (un disco que no abre también da bit 1 sin tabla, pero no trae power_mode: es un fallo). Los
+    bits de salud (2 en adelante) no invalidan la lectura.
+    """
+    try:
+        j = json.loads(salida)
+    except ValueError:
+        return Lectura("fallo", motivo=f"JSON inválido (rc {rc})")
+    if not isinstance(j, dict):
+        return Lectura("fallo", motivo="JSON inesperado")
+    sc = j.get("smartctl")
+    estado = sc.get("exit_status") if isinstance(sc, dict) else None
+    if isinstance(estado, bool) or not isinstance(estado, int):
+        estado = rc
+    if estado & 0x1:
+        return Lectura("fallo", motivo=f"smartctl: error de línea de órdenes (exit {estado})")
+    atributos = j.get("ata_smart_attributes")
+    tabla = atributos.get("table") if isinstance(atributos, dict) else None
+    if estado & 0x2 and not (isinstance(tabla, list) and tabla):
+        modo = j.get("power_mode")
+        nombre = modo.get("name") if isinstance(modo, dict) else None
+        if isinstance(nombre, str) and ("STANDBY" in nombre.upper() or "SLEEP" in nombre.upper()):
+            return Lectura("standby")
+        return Lectura("fallo", motivo=f"smartctl no pudo leer el disco (exit {estado})")
+    temperatura = j.get("temperature")
+    actual = temperatura.get("current") if isinstance(temperatura, dict) else None
+    if isinstance(actual, bool) or not isinstance(actual, int):
+        return Lectura("fallo", motivo="sin temperature.current entero")
+    return Lectura("ok", actual)
+
+
+_COLGADOS: list[subprocess.Popen] = []
+
+
+def leer_discos(discos: list[Disco], timeout: float = SMARTCTL_TIMEOUT_S) -> dict[str, Lectura]:
+    """Un smartctl por disco, en paralelo, con un plazo común de `timeout` segundos."""
+    for p in list(_COLGADOS):
+        if p.poll() is not None:
+            _COLGADOS.remove(p)
+    res: dict[str, Lectura] = {}
+    procesos = {}
+    for d in discos:
+        try:
+            procesos[d.id] = subprocess.Popen([SMARTCTL, "-j", "-n", "standby", "-A", d.ruta],
+                                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                              stdin=subprocess.DEVNULL, text=True)
+        except OSError as e:
+            res[d.id] = Lectura("fallo", motivo=f"no se pudo ejecutar smartctl: {e}")
+    limite = time.monotonic() + timeout
+    for ident, p in procesos.items():
+        try:
+            salida, _ = p.communicate(timeout=max(0.0, limite - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            p.kill()
+            try:
+                p.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                _COLGADOS.append(p)
+            res[ident] = Lectura("fallo", motivo=f"smartctl sin respuesta en {timeout:g} s")
+            continue
+        res[ident] = interpretar_smartctl(salida, p.returncode)
+    return res
+
+
+@dataclass
+class EstadoDisco:
+    base: int | None = None    # última lectura aceptada
+    descartes: int = 0         # saltos > 10 °C seguidos respecto de la base
+    fallos: int = 0            # lecturas fallidas seguidas
+    temp: int | None = None    # lo que aporta este ciclo (válida o sospechosa)
+    sospechosa: bool = False
+    standby: bool = False
+
+
+def verosimilitud(ed: EstadoDisco, lectura: Lectura) -> None:
+    """Spec §3.1. Fuera de 5–90 °C: fallo. Salto > 10 °C desde la base: descartada; tras dos
+    descartes seguidos, la tercera lectura que sigue saltando pasa a ser la base sólo si es < 50.
+    Un salto a >= 50 es «sospechoso»: aporta temperatura (dar aire de más no es peligroso) pero
+    nunca se acepta como base.
+    """
+    ed.temp, ed.sospechosa, ed.standby = None, False, False
+    if lectura.tipo == "standby":
+        ed.standby, ed.fallos = True, 0
+        return
+    t = lectura.temp
+    if lectura.tipo != "ok" or t is None or not 5 <= t <= 90:
+        ed.fallos += 1
+        return
+    ed.fallos = 0
+    if ed.base is None or abs(t - ed.base) <= 10:
+        ed.base, ed.descartes, ed.temp = t, 0, t
+        return
+    ed.descartes += 1
+    if t >= 50:
+        ed.temp, ed.sospechosa = t, True
+    elif ed.descartes > 2:
+        ed.base, ed.descartes, ed.temp = t, 0, t
+
+
+# --- sysfs ---------------------------------------------------------------------------------------
+
+class SinDriver(Exception):
+    """Falta el sysfs del it87 o el pwmN_auto_start de algún canal: no se escribe nada."""
+
+
+def resolver_hwmon() -> Path | None:
+    """El hwmonN del it87 (el número cambia entre arranques): se resuelve en cada ciclo."""
+    for p in sorted(Path(r) for r in glob.glob(HWMON_GLOB)):
+        try:
+            if (p / "name").read_text(encoding="ascii").strip() == CHIP:
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def _escribir_archivo(ruta: Path, valor: int) -> None:
+    with open(ruta, "w", encoding="ascii") as f:
+        f.write(str(valor))
+
+
+class Hwmon:
+    def __init__(self, ruta: Path, simular: bool = False):
+        self.ruta, self.simular = ruta, simular
+
+    def existe(self, attr: str) -> bool:
+        return (self.ruta / attr).exists()
+
+    def leer(self, attr: str) -> int:
+        return int((self.ruta / attr).read_text(encoding="ascii").strip())
+
+    def leer_o_none(self, attr: str) -> int | None:
+        try:
+            return self.leer(attr)
+        except (OSError, ValueError):
+            return None
+
+    def escribir(self, attr: str, valor: int) -> None:
+        if self.simular:
+            log(f"simular: escribiría {attr}={valor}")
+            return
+        _escribir_archivo(self.ruta / attr, valor)
+
+
+def precondicion(hw: Hwmon | None) -> str | None:
+    """Motivo por el que no se puede escribir en ningún canal, o None (spec §2.2, D1)."""
+    if hw is None:
+        return f"no está el sysfs del it87 ({HWMON_GLOB}, name={CHIP})"
+    faltan = [f"{c}_auto_start" for c in CANALES if not hw.existe(f"{c}_auto_start")]
+    if faltan:
+        return f"falta {', '.join(faltan)}: DKMS sin el parche local, no se escribe en ningún canal"
+    return None
+
+
+def escalon_vigente(ahora: float | None = None) -> bool:
+    try:
+        mtime = ESCALON.stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() if ahora is None else ahora) - mtime < ESCALON_VIGENCIA_S
+
+
+def corregir_canal(hw: Hwmon, c: str) -> int:
+    """Curva del chip (Off 0, Start 0, Full 80, pendiente 0) y automático. Devuelve correcciones.
+
+    La curva va antes que el automático: el driver sólo valida Off <= Start <= Full al pasar a 2
+    (check_trip_points), y así ese paso nunca falla por una curva que dejó la BIOS u otro programa.
+    """
+    hechas = 0
+    for attr, valor in CURVA_CHIP:
+        nombre = f"{c}_{attr}"
+        if hw.leer(nombre) != valor:
+            hw.escribir(nombre, valor)
+            hechas += 1
+    if hw.leer(f"{c}_enable") != 2:
+        hw.escribir(f"{c}_enable", 2)
+        hechas += 1
+    return hechas
+
+
+# --- control -------------------------------------------------------------------------------------
+
+@dataclass
+class Control:
+    cfg: Config
+    simular: bool = False
+    aplicado: dict = field(default_factory=dict)
+    objetivo: dict = field(default_factory=dict)
+    objetivo_dia: dict = field(default_factory=dict)  # lo que pediría la curva diurna (D14)
+    leido: dict = field(default_factory=dict)
+    ciclos_bajo: dict = field(default_factory=lambda: {c: 0 for c in CANALES})
+    ciclos_parado: dict = field(default_factory=lambda: {c: 0 for c in CANALES})
+    discos: dict = field(default_factory=dict)        # id -> EstadoDisco
+    info: dict = field(default_factory=dict)          # id -> Disco
+    ciclos_sin_lectura: int = 0
+    ultimo_t: int | None = None
+    t_ctrl: int | None = None
+    ciego: bool = False
+    todos_standby: bool = False
+    parados: set = field(default_factory=set)
+    correcciones: int = 0
+    modo: str = "noche"
+    motivo: str = ""
+    festivos_cubiertos: bool = True
+    escalon: bool = False
+    estado: str = "ok"
+
+
+def actualizar_temperaturas(ctl: Control, discos: list[Disco], lecturas: dict[str, Lectura]) -> None:
+    vistos = set()
+    for d in discos:
+        vistos.add(d.id)
+        ctl.info[d.id] = d
+        verosimilitud(ctl.discos.setdefault(d.id, EstadoDisco()), lecturas.get(d.id, Lectura("fallo")))
+    for ident in list(ctl.discos):
+        if ident not in vistos:
+            del ctl.discos[ident]
+            ctl.info.pop(ident, None)
+    temps = [ed.temp for ed in ctl.discos.values() if ed.temp is not None]
+    ctl.todos_standby = bool(ctl.discos) and all(ed.standby for ed in ctl.discos.values())
+    if temps:
+        ctl.t_ctrl = ctl.ultimo_t = max(temps)
+        ctl.ciclos_sin_lectura = 0
+    elif ctl.todos_standby:
+        # Todos dormidos no es ceguera: no generan calor. Reinicia la cuenta aunque viniera de fallos.
+        ctl.t_ctrl = None
+        ctl.ciclos_sin_lectura = 0
+    else:
+        ctl.t_ctrl = None
+        ctl.ciclos_sin_lectura += 1
+    ctl.ciego = ctl.ciclos_sin_lectura >= CICLOS_CIEGO
+
+
+def decidir_objetivos(ctl: Control, fans: dict[str, int | None]) -> None:
+    """Objetivo por canal (spec §3.2 y §3.3; enmienda rev. 5.1 §2.2 y §4.3): el piso es el del modo
+    vigente. objetivo_dia es el mismo cálculo con la curva diurna (D14). Requiere ctl.aplicado al día.
+    """
+    noche = ctl.modo == "noche"
+    for c in CANALES:
+        piso = ctl.cfg.canal(c, "PISO_NOCHE" if noche else "PISO")
+        if fans.get(c) == 0 and ctl.aplicado[c] >= piso:
+            ctl.ciclos_parado[c] += 1
+        else:
+            ctl.ciclos_parado[c] = 0
+    ctl.parados = {c for c in CANALES if ctl.ciclos_parado[c] >= CICLOS_PARADO}
+    for c, (_, _, _, otro) in CANALES.items():
+        for destino, de_noche in ((ctl.objetivo, noche), (ctl.objetivo_dia, False)):
+            piso = ctl.cfg.canal(c, "PISO_NOCHE" if de_noche else "PISO")
+            if ctl.ciego or otro in ctl.parados:
+                obj = MAXIMO
+            elif ctl.t_ctrl is not None:
+                obj = curva(ctl.t_ctrl, c, de_noche, ctl.cfg)
+            elif ctl.todos_standby:
+                obj = piso
+            elif ctl.ultimo_t is not None:
+                obj = curva(ctl.ultimo_t, c, de_noche, ctl.cfg)
+            else:
+                obj = ctl.aplicado[c]
+            destino[c] = max(obj, piso)
+
+
+def preparar(ctl: Control, hw: Hwmon, ahora: float | None = None) -> None:
+    """Spec §2.2: verifica antes de escribir; luego curva del chip, automático y respaldo."""
+    motivo = precondicion(hw)
+    if motivo:
+        raise SinDriver(motivo)
+    ctl.escalon = escalon_vigente(ahora)
+    if ctl.escalon:
+        for c in CANALES:
+            ctl.aplicado[c] = ctl.leido[c] = hw.leer(f"{c}_auto_start")
+        log("escalón de la guardia vigente: preparar no escribe nada")
+        return
+    for c in CANALES:
+        # Al preparar, reaplicar la curva tras la BIOS es rutina; sólo cuenta como corrección un
+        # canal que no estaba en automático (spec §2.2).
+        fuera_de_automatico = hw.leer(f"{c}_enable") != 2
+        corregir_canal(hw, c)
+        ctl.correcciones += int(fuera_de_automatico)
+        respaldo = ctl.cfg.canal(c, "RESPALDO")
+        if hw.leer(f"{c}_auto_start") != respaldo:
+            hw.escribir(f"{c}_auto_start", respaldo)
+        ctl.aplicado[c] = respaldo
+    log("preparado: " + ", ".join(f"{c}_auto_start={ctl.aplicado[c]}" for c in CANALES))
+
+
+def ciclo(ctl: Control, hw: Hwmon | None, ahora_dt: dt.datetime, discos: list[Disco],
+          lecturas: dict[str, Lectura], ahora: float | None = None) -> None:
+    """Un ciclo de control. La precondición común va primero (N4-M1): sin ella no se escribe."""
+    motivo = precondicion(hw)
+    if motivo:
+        raise SinDriver(motivo)
+    ctl.escalon = escalon_vigente(ahora)
+    actualizar_temperaturas(ctl, discos, lecturas)
+    ctl.modo, ctl.motivo, ctl.festivos_cubiertos = decidir_modo(ctl.cfg, ahora_dt)
+    leidos = {c: hw.leer(f"{c}_auto_start") for c in CANALES}
+    fans = {c: hw.leer_o_none(CANALES[c][1] + "_input") for c in CANALES}
+    if ctl.escalon:
+        # La guardia ya escribió 255: el controlador no toca nada y parte de lo leído al terminar.
+        for c in CANALES:
+            ctl.objetivo[c] = ctl.objetivo_dia[c] = MAXIMO
+            ctl.aplicado[c] = ctl.leido[c] = leidos[c]
+            ctl.ciclos_bajo[c] = 0
+        ctl.parados = set()
+    else:
+        for c in CANALES:
+            ctl.correcciones += corregir_canal(hw, c)            # N4-M3: también en el bucle
+            if not ctl.simular and leidos[c] != ctl.aplicado.get(c):
+                log(f"{c}_auto_start={leidos[c]} y el último aplicado fue {ctl.aplicado.get(c)}: "
+                    "se continúa desde lo leído")
+                ctl.correcciones += 1
+                ctl.aplicado[c] = leidos[c]
+            ctl.aplicado.setdefault(c, leidos[c])
+        decidir_objetivos(ctl, fans)
+        for c in CANALES:
+            nuevo, ctl.ciclos_bajo[c] = suavizar(ctl.objetivo[c], ctl.aplicado[c], ctl.ciclos_bajo[c],
+                                                 ctl.cfg)
+            if nuevo != ctl.aplicado[c]:
+                hw.escribir(f"{c}_auto_start", nuevo)
+                ctl.aplicado[c] = nuevo
+            # Simulando, el chip no cambia: leído es lo que hay; si no, se relee tras escribir.
+            ctl.leido[c] = leidos[c] if ctl.simular else hw.leer(f"{c}_auto_start")
+    ctl.estado = ("ciego" if ctl.ciego else "ventilador_parado" if ctl.parados
+                  else "simulando" if ctl.simular else "ok")
+
+
+# --- métrica -------------------------------------------------------------------------------------
+
+def _esc(v: str) -> str:
+    return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def texto_metrica(ctl: Control, ahora: float) -> str:
+    L = []
+
+    def serie(nombre, ayuda, filas):
+        L.append(f"# HELP {nombre} {ayuda}")
+        L.append(f"# TYPE {nombre} {'counter' if nombre.endswith('_total') else 'gauge'}")
+        for etiquetas, valor in filas:
+            et = ",".join(f'{k}="{_esc(str(v))}"' for k, v in etiquetas.items())
+            L.append(f"{nombre}{{{et}}} {valor}" if et else f"{nombre} {valor}")
+
+    def et_disco(ident):
+        d = ctl.info.get(ident)
+        return {"disco": ident, "dev": d.dev if d else "", "modelo": d.modelo if d else ""}
+
+    ids = sorted(ctl.discos)
+    serie("wtr_disco_temperatura_celsius", "Temperatura SMART (temperature.current) del ultimo ciclo.",
+          [(et_disco(i), ctl.discos[i].temp) for i in ids if ctl.discos[i].temp is not None])
+    serie("wtr_disco_lectura_ok", "0 si el disco lleva mas de 5 lecturas fallidas seguidas.",
+          [(et_disco(i), int(ctl.discos[i].fallos <= FALLOS_TOLERADOS)) for i in ids])
+    serie("wtr_disco_lectura_sospechosa", "1 si la lectura es >= 50 tras un salto > 10 C sin base aceptada.",
+          [(et_disco(i), int(ctl.discos[i].sospechosa)) for i in ids])
+    serie("wtr_disco_standby", "1 si el disco esta en standby (no aporta muestra).",
+          [(et_disco(i), int(ctl.discos[i].standby)) for i in ids])
+    if ctl.t_ctrl is not None:
+        serie("wtr_disco_temperatura_max_celsius", "Temperatura que manda el control (maximo de los discos).",
+              [({}, ctl.t_ctrl)])
+    for nombre, ayuda, valores in (
+            ("wtr_ventiladores_pwm_objetivo", "PWM objetivo del canal segun la curva.", ctl.objetivo),
+            ("wtr_ventiladores_pwm_objetivo_dia",
+             "PWM objetivo de la curva diurna a la T actual (255 si ciego, escalon o parado).", ctl.objetivo_dia),
+            ("wtr_ventiladores_pwm_aplicado", "Start PWM aplicado al canal (pwmN_auto_start).", ctl.aplicado),
+            ("wtr_ventiladores_pwm_leido", "pwmN_auto_start leido del chip.", ctl.leido)):
+        serie(nombre, ayuda, [({"canal": c, "ventilador": CANALES[c][0]}, valores[c])
+                              for c in CANALES if valores.get(c) is not None])
+    serie("wtr_ventiladores_modo", "Modo de la curva (1 = vigente).",
+          [({"modo": m}, int(ctl.modo == m)) for m in ("dia", "noche")])
+    noche = ctl.modo == "noche" and any(ctl.aplicado.get(c, 0) > ctl.cfg.canal(c, "NOCHE") for c in CANALES)
+    serie("wtr_ventiladores_sobre_noche", "1 si de noche algun canal supera su nivel nocturno.", [({}, int(noche))])
+    serie("wtr_ventiladores_escalon_guardia_vigente", "1 si el escalon de la guardia esta vigente.",
+          [({}, int(ctl.escalon))])
+    serie("wtr_ventiladores_estado", "Estado del controlador (1 = vigente).",
+          [({"estado": e}, int(ctl.estado == e)) for e in ESTADOS])
+    serie("wtr_ventiladores_correcciones_total", "Correcciones del canal (automatico, curva, Start PWM ajeno).",
+          [({}, ctl.correcciones)])
+    serie("wtr_ventiladores_festivos_cubiertos", "1 si la lista de festivos cubre el anio en curso.",
+          [({}, int(ctl.festivos_cubiertos))])
+    serie("wtr_ventiladores_config_ok", "1 si /etc/wtr-ventiladores.conf no tiene errores.",
+          [({}, int(ctl.cfg.ok))])
+    serie("wtr_ventiladores_ultimo_ciclo_segundos", "Momento del ultimo ciclo (epoch).", [({}, int(ahora))])
+    return "\n".join(L) + "\n"
+
+
+def escribir_metrica(ruta: Path, contenido: str) -> None:
+    """Escritura atómica: node_exporter nunca ve un archivo a medias."""
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=ruta.parent, prefix=".wtr_ventiladores.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="ascii", errors="replace") as f:
+            f.write(contenido)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, ruta)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def publicar(ctl: Control) -> None:
+    try:
+        escribir_metrica(METRICA, texto_metrica(ctl, time.time()))
+    except OSError as e:
+        log(f"no se pudo escribir {METRICA}: {e}")
+
+
+# --- systemd -------------------------------------------------------------------------------------
+
+def notificar(mensaje: str) -> None:
+    destino = os.environ.get("NOTIFY_SOCKET")
+    if not destino:
+        return
+    if destino.startswith("@"):
+        destino = "\0" + destino[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC) as s:
+            s.connect(destino)
+            s.sendall(mensaje.encode())
+    except OSError as e:
+        log(f"sd_notify: {e}")
+
+
+def tomar_lock():
+    RUN.mkdir(parents=True, exist_ok=True)
+    f = open(RUN / "lock", "a+")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.close()
+        return None
+    return f
+
+
+# --- comandos ------------------------------------------------------------------------------------
+
+def _resumen(ctl: Control) -> str:
+    t = "ciego" if ctl.ciego else ("standby" if ctl.t_ctrl is None and ctl.todos_standby else ctl.t_ctrl)
+    canales = " ".join(f"{CANALES[c][0]} obj={ctl.objetivo.get(c)} dia={ctl.objetivo_dia.get(c)} "
+                       f"apl={ctl.aplicado.get(c)}" for c in CANALES)
+    return (f"T={t} modo={ctl.modo} {canales} estado={ctl.estado}"
+            + (" escalon-guardia" if ctl.escalon else ""))
+
+
+def cmd_correr(args) -> int:
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    lock = tomar_lock()
+    if lock is None:
+        log(f"otra instancia tiene {RUN / 'lock'}")
+        return 1
+    cfg = leer_config(CONF)
+    for e in cfg.errores:
+        log(f"config: {e}")
+    ctl = Control(cfg=cfg, simular=args.simular)
+    ctl.modo, ctl.motivo, ctl.festivos_cubiertos = decidir_modo(cfg, dt.datetime.now(ZONA))
+    raiz = resolver_hwmon()
+    hw = Hwmon(raiz, args.simular) if raiz else None
+    try:
+        preparar(ctl, hw)
+    except SinDriver as e:
+        log(f"{e}; sale {SALIR_SIN_DRIVER} sin haber escrito nada")
+        ctl.estado = "sin_driver"
+        publicar(ctl)
+        return SALIR_SIN_DRIVER
+    except (OSError, ValueError) as e:
+        log(f"error de sysfs al preparar: {e}")
+        ctl.estado = "error_escritura"
+        publicar(ctl)
+        return 1
+    notificar("READY=1")
+    errores_previos = cfg.errores
+    while True:
+        inicio = time.monotonic()
+        ctl.cfg = leer_config(CONF)
+        if ctl.cfg.errores != errores_previos:   # se registran al cambiar; la métrica config_ok los cubre
+            log("config: " + ("; ".join(ctl.cfg.errores) or "sin errores"))
+            errores_previos = ctl.cfg.errores
+        try:
+            discos = descubrir_discos(ctl.cfg)
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            log(f"no se pudieron descubrir los discos: {e}")
+            discos = []
+        lecturas = leer_discos(discos)
+        for d in discos:
+            if lecturas[d.id].tipo == "fallo":
+                log(f"{d.dev} ({d.id}): {lecturas[d.id].motivo}")
+        raiz = resolver_hwmon()
+        hw = Hwmon(raiz, args.simular) if raiz else None
+        try:
+            ciclo(ctl, hw, dt.datetime.now(ZONA), discos, lecturas)
+        except SinDriver as e:
+            log(f"{e}; sale {SALIR_SIN_DRIVER}")
+            ctl.estado = "sin_driver"
+            publicar(ctl)
+            return SALIR_SIN_DRIVER
+        except (OSError, ValueError) as e:
+            log(f"error de sysfs: {e}")
+            ctl.estado = "error_escritura"
+            publicar(ctl)
+            return 1
+        publicar(ctl)
+        resumen = _resumen(ctl)
+        log(resumen)
+        notificar(f"WATCHDOG=1\nSTATUS={resumen}")
+        time.sleep(max(0.0, ctl.cfg["CICLO_S"] - (time.monotonic() - inicio)))
+
+
+def cmd_respaldo(args) -> int:
+    """ExecStopPost: deja el respaldo con la precondición completa; si no, no escribe en ninguno."""
+    cfg = leer_config(CONF)
+    raiz = resolver_hwmon()
+    if raiz is None:
+        log("respaldo: no está el sysfs del it87; no se escribe nada")
+        return 0
+    hw = Hwmon(raiz, args.simular)
+    motivo = precondicion(hw)
+    if motivo:
+        log(f"respaldo: {motivo}")
+        return 0
+    if escalon_vigente():
+        log("respaldo: escalón de la guardia vigente; no se escribe nada")
+        return 0
+    try:
+        for c in CANALES:
+            respaldo = cfg.canal(c, "RESPALDO")
+            if hw.leer(f"{c}_auto_start") != respaldo:
+                hw.escribir(f"{c}_auto_start", respaldo)
+            if hw.leer(f"{c}_enable") != 2:
+                hw.escribir(f"{c}_enable", 2)
+    except (OSError, ValueError) as e:
+        log(f"respaldo: error de sysfs: {e}")
+        return 1
+    log("respaldo: " + ", ".join(f"{c}_auto_start={cfg.canal(c, 'RESPALDO')}" for c in CANALES)
+        + (" (simulado)" if args.simular else ""))
+    return 0
+
+
+def cmd_decidir(args) -> int:
+    cfg = leer_config(CONF)
+    ahora = dt.datetime.now(ZONA) if args.en is None else dt.datetime.fromisoformat(args.en)
+    if ahora.tzinfo is None:
+        ahora = ahora.replace(tzinfo=ZONA)
+    modo, motivo, _ = decidir_modo(cfg, ahora)
+    print(f"{ahora.astimezone(ZONA).isoformat(timespec='minutes')} -> {modo} ({motivo})")
+    return 0
+
+
+def cmd_estado(args) -> int:
+    cfg = leer_config(CONF)
+    ahora = dt.datetime.now(ZONA)
+    modo, motivo, cubiertos = decidir_modo(cfg, ahora)
+    print(f"hora: {ahora.isoformat(timespec='seconds')}")
+    print(f"modo: {modo} ({motivo}){'' if cubiertos else ' - FESTIVOS SIN CUBRIR'}")
+    print("config: " + ("ok" if cfg.ok else "ERRORES: " + "; ".join(cfg.errores)))
+    print("curva: " + " ".join(f"{k}={cfg[k]}" for k in CURVA))
+    raiz = resolver_hwmon()
+    hw = Hwmon(raiz) if raiz else None
+    print(f"sysfs: {raiz or 'NO ENCONTRADO'}; precondición: {precondicion(hw) or 'ok'}; "
+          f"escalón de la guardia: {'VIGENTE' if escalon_vigente() else 'no'}")
+    if hw:
+        for c, (vent, fan, _, _) in CANALES.items():
+            attrs = ("enable", "auto_start", "auto_point1_temp", "auto_point2_temp", "auto_point3_temp",
+                     "auto_slope")
+            print(f"{c} ({vent}): " + " ".join(f"{a}={hw.leer_o_none(f'{c}_{a}')}" for a in attrs)
+                  + f" {fan}={hw.leer_o_none(fan + '_input')} rpm")
+    try:
+        discos = descubrir_discos(cfg)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        print(f"discos: no se pudieron descubrir ({e})")
+        return 1
+    lecturas = leer_discos(discos)
+    for d in discos:
+        lec = lecturas[d.id]
+        print(f"{d.dev} {d.id}: {lec.tipo} {'' if lec.temp is None else f'{lec.temp} C'} {lec.motivo}")
+    return 0
+
+
+def cmd_calibrar(args) -> int:
+    """Con el servicio parado: escribe N en el canal, mide y vuelve al respaldo (spec §4.1)."""
+    if not 51 <= args.pwm <= MAXIMO:
+        print(f"calibrar: --pwm debe estar entre 51 y {MAXIMO}", file=sys.stderr)
+        return 2
+    activo = subprocess.run([SYSTEMCTL, "is-active", "--quiet", SERVICIO], check=False).returncode == 0
+    if activo:
+        print(f"calibrar: {SERVICIO} está activo; primero systemctl stop {SERVICIO}", file=sys.stderr)
+        return 1
+    lock = tomar_lock()
+    if lock is None:
+        print(f"calibrar: otra instancia tiene {RUN / 'lock'}", file=sys.stderr)
+        return 1
+    cfg = leer_config(CONF)
+    raiz = resolver_hwmon()
+    hw = Hwmon(raiz) if raiz else None
+    motivo = precondicion(hw)
+    if motivo or escalon_vigente():
+        print(f"calibrar: {motivo or 'escalón de la guardia vigente'}; no se escribe nada", file=sys.stderr)
+        return 1
+    c = args.canal
+    vent, fan, _, _ = CANALES[c]
+    if hw.leer(f"{c}_enable") != 2:
+        print(f"calibrar: {c}_enable no vale 2; no se escribe nada", file=sys.stderr)
+        return 1
+    rpms, tmax = [], None
+    try:
+        hw.escribir(f"{c}_auto_start", args.pwm)
+        print(f"{c} ({vent}) = {args.pwm} ({args.pwm * 100 / 255:.0f} %) durante {args.minutos:g} min")
+        fin = time.monotonic() + args.minutos * 60
+        while time.monotonic() < fin:
+            time.sleep(10)
+            rpm = hw.leer_o_none(fan + "_input")
+            try:
+                discos = descubrir_discos(cfg)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                discos = []
+            temps = [lec.temp for lec in leer_discos(discos).values() if lec.temp is not None]
+            t = max(temps) if temps else None
+            rpms.append(rpm)
+            tmax = t if tmax is None or (t is not None and t > tmax) else tmax
+            print(f"  {time.strftime('%H:%M:%S')} {fan}={rpm} rpm, T máx {t} C")
+            if t is not None and t >= cfg["T_CONVERGE_C"]:
+                print(f"calibrar: T {t} C >= {cfg['T_CONVERGE_C']} C, se aborta", file=sys.stderr)
+                break
+    finally:
+        respaldo = cfg.canal(c, "RESPALDO")
+        if escalon_vigente():
+            # La guardia dio todo el aire durante la calibración: no se le baja el canal.
+            print(f"calibrar: escalón de la guardia vigente; {c} queda como lo dejó la guardia", file=sys.stderr)
+        else:
+            hw.escribir(f"{c}_auto_start", respaldo)
+            print(f"{c} de vuelta en el respaldo ({respaldo})")
+    validas = [r for r in rpms if r is not None]
+    print(f"fila: {vent.upper()} | {args.pwm} | {args.pwm * 100 / 255:.0f} | "
+          f"{(sum(validas) / len(validas)) if validas else 0:.0f} (min {min(validas, default=0)}, "
+          f"max {max(validas, default=0)}) | dB 1 m: __ | dB dormitorio: __ | T máx {tmax}")
+    return 0
+
+
+def cmd_bios(args) -> int:
+    """Devuelve Start temp 20 °C y Start PWM 100 (los valores de la BIOS). Con el servicio parado."""
+    raiz = resolver_hwmon()
+    hw = Hwmon(raiz) if raiz else None
+    motivo = precondicion(hw)
+    if motivo or escalon_vigente():
+        print(f"bios: {motivo or 'escalón de la guardia vigente'}; no se escribe nada", file=sys.stderr)
+        return 1
+    for c in CANALES:
+        hw.escribir(f"{c}_auto_point2_temp", 20000)
+        hw.escribir(f"{c}_auto_start", 100)
+    print("bios: auto_point2_temp=20000 y auto_start=100 en pwm3 y pwm5")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="wtr-ventiladores", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for nombre, fn, ayuda in (("correr", cmd_correr, "bucle del servicio"),
+                              ("respaldo", cmd_respaldo, "ExecStopPost: deja el respaldo")):
+        p = sub.add_parser(nombre, help=ayuda)
+        p.add_argument("--simular", action="store_true", help="todo menos escribir en sysfs")
+        p.set_defaults(fn=fn)
+    sub.add_parser("estado", help="configuración, sysfs y discos").set_defaults(fn=cmd_estado)
+    d = sub.add_parser("decidir", help="sólo el modo día/noche para un instante")
+    d.add_argument("--en", help="instante ISO 8601 (sin zona: hora de Madrid)")
+    d.set_defaults(fn=cmd_decidir)
+    k = sub.add_parser("calibrar", help="un PWM fijo durante unos minutos, con el servicio parado")
+    k.add_argument("--canal", choices=tuple(CANALES), required=True)
+    k.add_argument("--pwm", type=int, required=True)
+    k.add_argument("--minutos", type=float, default=3.0)
+    k.set_defaults(fn=cmd_calibrar)
+    sub.add_parser("bios", help="Start temp 20 °C y Start PWM 100").set_defaults(fn=cmd_bios)
+    args = ap.parse_args(argv)
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

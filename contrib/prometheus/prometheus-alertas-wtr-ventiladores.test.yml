@@ -1,0 +1,403 @@
+# SPDX-FileCopyrightText: 2026 Gabriel González Pineda <https://github.com/phyrexia>
+# SPDX-License-Identifier: Apache-2.0
+# promtool test rules prometheus-alertas-wtr-ventiladores.test.yml
+# Casos de la spec §8.1 (caso 17), N4-M2 (una sola alerta cuando se cumplen las dos ramas del `or`) y
+# WtrConfiguracionInvalida (enmienda rev. 5.1 §5.1).
+# La etiqueta `file` de node_textfile_mtime_seconds es la ruta completa: node_exporter 1.9.0 del
+# WTR MAX, leída el 2026-10-13.
+# instance="wtr-max:9100" es el target del WTR MAX; other-node:9100 es otro exportador (por ejemplo,
+# un contenedor que ve el sysfs del host) cuyas series no deben contar.
+rule_files:
+  - prometheus-alertas-wtr-ventiladores.yml
+
+evaluation_interval: 1m
+
+tests:
+
+  # --- WtrDiscoCaliente: disco válido a 51 °C dispara a los 15 min ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_disco_temperatura_celsius{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-HGST_HUS724040ALA640_EXAMPLE0001",dev="sdf",modelo="HGST HUS724040ALA640"}'
+        values: '51x20'
+      - series: 'wtr_disco_lectura_sospechosa{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-HGST_HUS724040ALA640_EXAMPLE0001",dev="sdf",modelo="HGST HUS724040ALA640"}'
+        values: '0x20'
+      - series: 'wtr_disco_temperatura_celsius{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-ST4000VN008-2DR166_EXAMPLE0002",dev="sdb",modelo="ST4000VN008-2DR166"}'
+        values: '40x20'
+      - series: 'wtr_disco_lectura_sospechosa{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-ST4000VN008-2DR166_EXAMPLE0002",dev="sdb",modelo="ST4000VN008-2DR166"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WtrDiscoCaliente
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WtrDiscoCaliente
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: "WTR MAX: un disco lleva 15 min sobre 50 °C (51 °C). El controlador ya va a 80 % o más; revisar polvo, ventiladores y temperatura ambiente."
+
+  # --- WtrDiscoCaliente: un disco sospechoso a 55 °C no dispara (cruce on(instance, disco)), ni el
+  # mismo disco visto desde otro exportador ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_disco_temperatura_celsius{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-HGST_HUS724040ALA640_EXAMPLE0001",dev="sdf",modelo="HGST HUS724040ALA640"}'
+        values: '55x30'
+      - series: 'wtr_disco_lectura_sospechosa{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-HGST_HUS724040ALA640_EXAMPLE0001",dev="sdf",modelo="HGST HUS724040ALA640"}'
+        values: '1x30'
+      - series: 'wtr_disco_temperatura_celsius{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-WDC_WD40PURX-64NZ6Y0_WD-EXAMPLE0003",dev="sda",modelo="WDC WD40PURX-64NZ6Y0"}'
+        values: '42x30'
+      - series: 'wtr_disco_lectura_sospechosa{instance="wtr-max:9100",job="node",host="WTR MAX",disco="ata-WDC_WD40PURX-64NZ6Y0_WD-EXAMPLE0003",dev="sda",modelo="WDC WD40PURX-64NZ6Y0"}'
+        values: '0x30'
+      - series: 'wtr_disco_temperatura_celsius{instance="other-node:9100",job="node",host="other-node",disco="ata-HGST_HUS724040ALA640_EXAMPLE0001",dev="sdf",modelo="HGST HUS724040ALA640"}'
+        values: '60x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WtrDiscoCaliente
+        exp_alerts: []
+
+  # --- WtrDiscoCaliente por smartmon: el atributo 190 no cuenta, sólo el 194 ---
+  - interval: 1m
+    input_series:
+      - series: 'smartmon_temperature_celsius_raw_value{instance="wtr-max:9100",job="node",host="WTR MAX",disk="/dev/sdb",type="sat",smart_id="190"}'
+        values: '55x30'
+      - series: 'smartmon_temperature_celsius_raw_value{instance="wtr-max:9100",job="node",host="WTR MAX",disk="/dev/sdb",type="sat",smart_id="194"}'
+        values: '45x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: WtrDiscoCaliente
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'smartmon_temperature_celsius_raw_value{instance="wtr-max:9100",job="node",host="WTR MAX",disk="/dev/sdf",type="sat",smart_id="194"}'
+        values: '51x30'
+      - series: 'smartmon_temperature_celsius_raw_value{instance="wtr-max:9100",job="node",host="WTR MAX",disk="/dev/sda",type="sat",smart_id="194"}'
+        values: '40x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: WtrDiscoCaliente
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WtrDiscoCaliente
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: "WTR MAX: un disco lleva 15 min sobre 50 °C (51 °C). El controlador ya va a 80 % o más; revisar polvo, ventiladores y temperatura ambiente."
+
+  # --- WtrVentiladorParado: cruce on(instance, ventilador); MEM (2 hilos) y otro exportador no cuentan ---
+  - interval: 1m
+    input_series:
+      - series: 'node_hwmon_fan_rpm{instance="wtr-max:9100",job="node",host="WTR MAX",chip="platform_it87_2608",sensor="fan5",ventilador="sata"}'
+        values: '0x10'
+      - series: 'node_hwmon_fan_rpm{instance="wtr-max:9100",job="node",host="WTR MAX",chip="platform_it87_2608",sensor="fan3",ventilador="sys"}'
+        values: '730x10'
+      - series: 'node_hwmon_fan_rpm{instance="wtr-max:9100",job="node",host="WTR MAX",chip="platform_it87_2608",sensor="fan4",ventilador="mem"}'
+        values: '0x10'
+      - series: 'node_hwmon_fan_rpm{instance="other-node:9100",job="node",host="other-node",chip="platform_it87_2608",sensor="fan3",ventilador="sys"}'
+        values: '0x10'
+      - series: 'wtr_ventiladores_pwm_aplicado{instance="wtr-max:9100",job="node",host="WTR MAX",canal="pwm5",ventilador="sata"}'
+        values: '153x10'
+      - series: 'wtr_ventiladores_pwm_aplicado{instance="wtr-max:9100",job="node",host="WTR MAX",canal="pwm3",ventilador="sys"}'
+        values: '255x10'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: WtrVentiladorParado
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: WtrVentiladorParado
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100", job: node, host: "WTR MAX", chip: platform_it87_2608, sensor: fan5, ventilador: sata}
+            exp_annotations:
+              resumen: &parado "WTR MAX: el ventilador sata marca 0 rpm con PWM aplicado. Revisar el ventilador, el cable o el header; el otro canal ya está en 255."
+
+  # --- WtrControladorCaido: métrica vieja (mtime fijo) dispara a los 7 min; la de otro exportador no cuenta ---
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/wtr_ventiladores.prom"}'
+        values: '0x30'
+      - series: 'wtr_ventiladores_estado{instance="wtr-max:9100",job="node",host="WTR MAX",estado="ok"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: WtrControladorCaido
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: WtrControladorCaido
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: &caido "WTR MAX: wtr-ventiladores no está controlando (métrica vieja o ausente, o estado distinto de ok: ciego, sin_driver, ventilador_parado, error_escritura o simulando). Los ventiladores quedan en el respaldo (153/77), en 255 si está ciego, o con la BIOS si falta el parche del driver. journalctl -u wtr-ventiladores."
+
+  # --- WtrControladorCaido: métrica fresca y estado ok, ninguna alerta ---
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/wtr_ventiladores.prom"}'
+        values: '0+60x30'
+      - series: 'wtr_ventiladores_estado{instance="wtr-max:9100",job="node",host="WTR MAX",estado="ok"}'
+        values: '1x30'
+      - series: 'node_textfile_mtime_seconds{instance="other-node:9100",job="node",host="other-node",file="/var/lib/prometheus/node-exporter/wtr_ventiladores.prom"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WtrControladorCaido
+        exp_alerts: []
+
+  # --- WtrControladorCaido: estado distinto de ok y métrica vieja a la vez -> UNA alerta (N4-M2) ---
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/wtr_ventiladores.prom"}'
+        values: '0x30'
+      - series: 'wtr_ventiladores_estado{instance="wtr-max:9100",job="node",host="WTR MAX",estado="ok"}'
+        values: '0x30'
+      - series: 'wtr_ventiladores_estado{instance="wtr-max:9100",job="node",host="WTR MAX",estado="sin_driver"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: WtrControladorCaido
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: WtrControladorCaido
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: *caido
+      - eval_time: 10m
+        alertname: WtrControladorCaido
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: *caido
+
+  # --- WtrConfiguracionInvalida: config_ok=0 dispara a los 10 min, no a los 9 (enmienda rev. 5.1 §5.1) ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_ventiladores_config_ok{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: WtrConfiguracionInvalida
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: WtrConfiguracionInvalida
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100", job: node, host: "WTR MAX"}
+            exp_annotations:
+              resumen: "WTR MAX: /etc/wtr-ventiladores.conf tiene un valor inválido o una curva incoherente; el servicio corre con los valores de fábrica para lo afectado. journalctl -u wtr-ventiladores | grep config: dice qué línea; corregir el archivo (se relee en el ciclo siguiente). Tras una actualización suele ser el .conf viejo sin migrar (instalar.sh instalar)."
+
+  # --- WtrConfiguracionInvalida: config_ok=1, nunca ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_ventiladores_config_ok{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: WtrConfiguracionInvalida
+        exp_alerts: []
+
+  # --- WtrGuardiaDiscosEscalon: estado 1 sostenido 2 min ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_guardia_discos_estado{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WtrGuardiaDiscosEscalon
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: WtrGuardiaDiscosEscalon
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100", job: node, host: "WTR MAX"}
+            exp_annotations:
+              resumen: &escalon "WTR MAX: la guardia puso todo el aire (un disco a 54 °C o más, sostenido 2 min)."
+
+  # --- Apagado y Cautela: estados 2, 3 y 4 disparan la crítica; 5 sólo la cautela ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_guardia_discos_estado{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '2 2 3 3 4 4 5 5 5 5'
+      - series: 'wtr_guardia_discos_apagado_pendiente{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: "WTR MAX: la guardia de discos apaga o apagó el host, aísla un disco a 58 °C sin corroborar, o está ciega (estado 2; 1 = apagado pendiente). Revisar la causa; tras un apagado, wtr-guardia-discos reconocer."
+      - eval_time: 2m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: "WTR MAX: la guardia de discos apaga o apagó el host, aísla un disco a 58 °C sin corroborar, o está ciega (estado 3; 1 = apagado pendiente). Revisar la causa; tras un apagado, wtr-guardia-discos reconocer."
+      - eval_time: 4m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: "WTR MAX: la guardia de discos apaga o apagó el host, aísla un disco a 58 °C sin corroborar, o está ciega (estado 4; 1 = apagado pendiente). Revisar la causa; tras un apagado, wtr-guardia-discos reconocer."
+      - eval_time: 4m
+        alertname: WtrGuardiaDiscosCautela
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: WtrGuardiaDiscosCautela
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100", job: node, host: "WTR MAX"}
+            exp_annotations:
+              resumen: &cautela "WTR MAX: arranque tras un apagado térmico; durante 30 min la guardia no apaga salvo con tres discos corroborando. Revisar la causa y ejecutar wtr-guardia-discos reconocer."
+
+  # --- Cautela tras un apagado: con apagado_pendiente=1, crítica y cautela; tras reconocer
+  # (apagado_pendiente=0), sólo la cautela ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_guardia_discos_estado{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '5x10'
+      - series: 'wtr_guardia_discos_apagado_pendiente{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '1 1 1 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: "WTR MAX: la guardia de discos apaga o apagó el host, aísla un disco a 58 °C sin corroborar, o está ciega (estado 1; 1 = apagado pendiente). Revisar la causa; tras un apagado, wtr-guardia-discos reconocer."
+      - eval_time: 1m
+        alertname: WtrGuardiaDiscosCautela
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100", job: node, host: "WTR MAX"}
+            exp_annotations:
+              resumen: *cautela
+      - eval_time: 4m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: WtrGuardiaDiscosCautela
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100", job: node, host: "WTR MAX"}
+            exp_annotations:
+              resumen: *cautela
+
+  # --- Apagado pendiente y estado 2 a la vez -> UNA alerta (N4-M2) ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_guardia_discos_estado{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '2x5'
+      - series: 'wtr_guardia_discos_apagado_pendiente{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '1x5'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: "WTR MAX: la guardia de discos apaga o apagó el host, aísla un disco a 58 °C sin corroborar, o está ciega (estado 1; 1 = apagado pendiente). Revisar la causa; tras un apagado, wtr-guardia-discos reconocer."
+
+  # --- Vigilando: ni Escalon, ni Apagado, ni Cautela, ni Caida ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_guardia_discos_estado{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '0x20'
+      - series: 'wtr_guardia_discos_apagado_pendiente{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '0x20'
+      - series: 'wtr_guardia_discos_manual_emergencia{instance="wtr-max:9100",job="node",host="WTR MAX",canal="pwm3"}'
+        values: '0x20'
+      - series: 'wtr_guardia_discos_manual_emergencia{instance="wtr-max:9100",job="node",host="WTR MAX",canal="pwm5"}'
+        values: '0x20'
+      - series: 'wtr_guardia_discos_simulacro{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '0x20'
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/wtr_guardia_discos.prom"}'
+        values: '0+60x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: WtrGuardiaDiscosEscalon
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WtrGuardiaDiscosApagado
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WtrGuardiaDiscosCautela
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: WtrGuardiaDiscosCaida
+        exp_alerts: []
+
+  # --- WtrGuardiaDiscosCaida: métrica vieja ---
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/wtr_guardia_discos.prom"}'
+        values: '0x20'
+      - series: 'wtr_guardia_discos_simulacro{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: WtrGuardiaDiscosCaida
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: WtrGuardiaDiscosCaida
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: &caida "WTR MAX: la guardia de discos no protege (métrica vieja o ausente, ACCION=simulacro) o un canal quedó en manual de emergencia al 100 % por falta del parche: reconstruir el DKMS con el parche y wtr-guardia-discos reconocer. journalctl -u wtr-guardia-discos."
+
+  # --- WtrGuardiaDiscosCaida: manual_emergencia=1 en los dos canales -> UNA alerta (N4-M2) ---
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/wtr_guardia_discos.prom"}'
+        values: '0+60x20'
+      - series: 'wtr_guardia_discos_manual_emergencia{instance="wtr-max:9100",job="node",host="WTR MAX",canal="pwm3"}'
+        values: '1x20'
+      - series: 'wtr_guardia_discos_manual_emergencia{instance="wtr-max:9100",job="node",host="WTR MAX",canal="pwm5"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: WtrGuardiaDiscosCaida
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: WtrGuardiaDiscosCaida
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: *caida
+
+  # --- WtrGuardiaDiscosCaida: ACCION=simulacro (la guardia no apaga) ---
+  - interval: 1m
+    input_series:
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/wtr_guardia_discos.prom"}'
+        values: '0+60x20'
+      - series: 'wtr_guardia_discos_simulacro{instance="wtr-max:9100",job="node",host="WTR MAX"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: WtrGuardiaDiscosCaida
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: *caida
+
+  # --- C4: sin textfile (nunca existió o se borró) también dispara las dos alertas de caída ---
+  - interval: 1m
+    input_series:
+      - series: 'wtr_ventiladores_estado{instance="wtr-max:9100",job="node",host="WTR MAX",estado="ok"}'
+        values: '1x10'
+      - series: 'node_textfile_mtime_seconds{instance="wtr-max:9100",job="node",host="WTR MAX",file="/var/lib/prometheus/node-exporter/apt.prom"}'
+        values: '0+60x10'
+      - series: 'node_textfile_mtime_seconds{instance="other-node:9100",job="node",host="other-node",file="/var/lib/prometheus/node-exporter/wtr_ventiladores.prom"}'
+        values: '0+60x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: WtrControladorCaido
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: WtrControladorCaido
+        exp_alerts:
+          - exp_labels: {severity: warning, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: *caido
+      - eval_time: 3m
+        alertname: WtrGuardiaDiscosCaida
+        exp_alerts:
+          - exp_labels: {severity: critical, instance: "wtr-max:9100"}
+            exp_annotations:
+              resumen: *caida
