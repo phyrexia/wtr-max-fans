@@ -37,6 +37,7 @@ submission.
 |---|---|
 | Project memory of the maintainer's repository (`engine.py query`, two queries) | The driver README (chip identity, register map, DKMS procedure, supply-chain hashes, reversal) and the deployment commit. Base of §3.2–§3.6. |
 | The private spec (revision 4, four audit rounds) and its implementation receipts | Hybrid mode, the control law and its numbers, the guard's five steps, the common write precondition, the 17 unit-test cases, the host tests H0–H11. Base of §3.5–§3.6 and §3.11. |
+| The private spec **revision 5.1** (2026-10-14, one audit round) and the maintainer's first night with the controller | The first night (2026-10-13/14) switched to `night` on time but was not audibly quieter: the disk-cage night level equalled the day level, the base night level equalled the day floor, and the deadband held the applied PWM 5 above the target for 6 hours. Revision 5.1 gives every channel a night floor of its own, makes the night curve strictly lower than the day curve below 50 °C, treats "night = day" as a configuration error, adds a convergence rule to the deadband, and alerts on an invalid configuration. Its tachometer-verified floors (bottom 64 = 511 rpm, rear 89 = 708 rpm; 51 = 274 rpm rejected for lack of margin) are the `balanced` night values. Base of D6, D7, §3.4 step 3, §3.5, §3.7, §3.12 and §3.14. |
 | Curated library (`sb query … --research biblioteca`: installers for non-technical users, open-source licensing, fail-safe defaults) | **Nothing applicable** (results were unrelated to this domain). |
 | [fan2go](https://github.com/markusressel/fan2go) | One-off calibration persisted to a database (start PWM, max PWM, PWM→RPM map); `onExit: restore`; disk sensors via `/dev/disk/by-id`. We adopt "calibrate once, persist" and "restore on exit"; we reject its manual-mode mechanism and its AGPL-3.0 licence (would bind the whole product). |
 | [hddfancontrol](https://github.com/desbma/hddfancontrol) | Hottest disk drives a linear ramp; `pwm-test` as a separate subcommand; standby-aware probing. Adopted in the private spec; kept. |
@@ -62,8 +63,8 @@ submission.
 | D3 | **Identity gate, no override**: DMI product in the known list **and** Super-I/O ID `0x8613` **and** hwmon `name == it8613`; otherwise exit 3 with a plain reason. | The grill's hard constraint; the WTR PRO question is deferred to v1.x. |
 | D4 | **Guided calibration once**, persisted to `/etc/wtr-max-fans/hardware.ini`: per channel, PWM response (yes / no / no tachometer), role (`disk-cage`, `base`, `cpu`, `unmanaged`), firmware register snapshot. The controller does not start without it. | Fans and wiring differ per unit; the file is the contract between what was measured and what is controlled, and the source for a faithful uninstall. |
 | D5 | **Hybrid mode kept verbatim**: managed channels in automatic (`pwmN_enable=2`), flattened curve (Off 0 °C, Start 0 °C, Full 80 °C, slope 0), the controller writes only `pwmN_auto_start`; common precondition (every managed channel has `auto_start`, no guard step active) before any write; `ExecStopPost` backup. | Audited four times; it is what makes "the daemon died" harmless. |
-| D6 | **Control law kept**, parametrised by role and profile: hottest disk, piecewise-linear, day and night curves converging at 50 °C, 255 at 52 °C, step 20/4 per cycle, deadband 6, floor ≥ 51 (20 %). | Same numbers, same tests; only the sources of the per-channel constants change. |
-| D7 | **Three profiles** (`quiet`, `balanced`, `cool`) with identical temperature points and safety ceiling; `balanced` = the maintainer's measured values; a **noise test** in the wizard picks one. | Comfort depends on the fans and the room; safety does not. |
+| D6 | **Control law kept**, parametrised by role and profile: hottest disk, piecewise-linear, **day and night curves with their own floors**, the night curve strictly below the day curve for every T < 50 °C and equal from 50 °C, 255 at 52 °C, step 20/4 per cycle, deadband 6 over 3 cycles **plus convergence after 10 cycles** (`converge_cycles`), every floor ≥ 51 (20 %). | The private rev. 5.1 numbers and tests; the convergence rule is what stops the applied value sitting above the target for hours. |
+| D7 | **Three profiles** (`quiet`, `balanced`, `cool`) with identical temperature points and safety ceiling, each with four PWM values per role (floor, day at 46 °C, night floor, night at 46 °C) under strict invariants: `51 ≤ night_floor < floor ≤ day46`, `night_floor ≤ night46 < day46`; `balanced` = the maintainer's measured values; calibration **admits or clamps** night floors per unit with the tachometer; a **noise test** in the wizard picks a profile. "Night = day" is a configuration error, not a profile; `mode = day` exists for that. | Comfort depends on the fans and the room; safety does not; and a night mode that is not lower than the day is a bug, as the maintainer's first night showed. |
 | D8 | **Night mode generic**: local time, `night_start`/`night_end`, optional later end on weekends, optional holiday file (none shipped); unreadable holiday file ⇒ treated as a normal day. | Nothing of the maintainer's calendar travels; failing towards the day curve means more air, never less. |
 | D9 | **Guard default `alert`** (full air at 54 °C + journal + mail to root when `sendmail` exists + optional hook); **`shutdown` opt-in** from the menu with the corroboration rule shown; with a single disk, shutdown degrades to alert and the menu says so. | A surprise power-off is the one irreversible action; the corroboration rule needs two disks. |
 | D10 | **Menu = `whiptail` driven from Python**, every menu action also a CLI subcommand; no TTY ⇒ CLI only. | Zero extra packages on Debian (whiptail is `Priority: important`); testable without a terminal. |
@@ -199,32 +200,63 @@ step becomes active).
    `pwm4` → `unmanaged`), then confirmed by the user per PWM-controlled channel: the wizard runs that channel alone at
    255 for 5 s and asks "Which fan just sped up? rear (disk cage) / bottom (under the case) / other / not sure". "Not
    sure" keeps the default and flags `role_source = assumed`; "other" → `unmanaged`.
-4. **Noise test** (only on PWM-controlled, managed channels): plays the night levels of `quiet`, then `balanced`, then
-   `cool` for 20 s each, asking after each "Acceptable at night where the NAS lives? yes / no". The proposed profile is
-   the **loudest acceptable** one (more air at equal comfort); if none is acceptable, `quiet` with a note that disks
-   will run warmer within the safe band. The user can override.
-5. **Write `hardware.ini`** atomically with `calibrated = <ISO timestamp>` and start the controller.
+4. **Floor admission** (per managed channel; the tachometer rule of the private rev. 5.1, generalised to unknown fan
+   models): the candidate night floors of the three profiles for that role (§3.7: `disk-cage` 76 / 89 / 102, `base`
+   51 / 64 / 77) are tried from the lowest up. A candidate is **admitted** when, over 60 s with a tachometer sample
+   every 5 s, no sample is 0 or missing, `(max − min) / mean ≤ 5 %`, and `mean ≥ 25 % · rpm_full` (step 2). Once a
+   candidate is admitted every higher one is admitted without testing, so the usual cost is 60 s per channel, worst
+   case 3 min. The result is `min_night_floor[role]` in `hardware.ini`. Rationale for 25 %: the private rule was
+   "stable, and ≥ 100 rpm above the datasheet minimum minus its 20 % tolerance"; for the two Noctua models measured
+   that is 24–26 % of the rated maximum, and the product does not know the datasheet. On the maintainer's unit it
+   rejects `base` 51 (274 rpm ≈ 20 %) and admits 64 (511 rpm ≈ 37 %) and `disk-cage` 89 (708 rpm ≈ 37 %), the same
+   outcome as the private calibration. **If none of the three candidates is admitted**, `min_night_floor[role] = none`
+   is stored and the controller clamps that role's night floor to the active profile's day `floor` (no night floor
+   reduction on that channel; the night curve still runs strictly below the day curve above 38 °C because
+   `night46 < day46`); the wizard says "the `<role>` fan does not run reliably below `<highest candidate>`: its night
+   floor will equal the day floor" and recommends a profile whose day floor is above the highest rejected candidate,
+   `status` shows `rear: night floor not admitted (tachometer unstable up to 102) → 115 (day floor)`, and the journal
+   logs it once per controller start.
+5. **Noise test** (only on PWM-controlled, managed channels): plays the **night curve value at 42 °C** of `quiet`,
+   then `balanced`, then `cool` for 20 s each (§3.7 table; on the maintainer's unit 96 / 109 / 128 on the rear fans and
+   58 → clamped 64 / 71 / 89 on the bottom fan), never below the admitted floor, asking after each "Acceptable at night
+   where the NAS lives? yes / no". 42 °C is the typical night disk temperature on the maintainer's unit, so the owner
+   hears what the night will mostly sound like, not the floor. The proposed profile is the **loudest acceptable** one
+   (more air at equal comfort); if none is acceptable, `quiet` with a note that disks will run warmer within the safe
+   band. The user can override.
+6. **Write `hardware.ini`** atomically with `calibrated = <ISO timestamp>` and start the controller.
 
 Outcome cases: 0 managed channels → guard only, menu says "fan control is not available with the fans detected";
 1 managed channel → the stopped-fan rule has no partner, so it becomes alert-only; 2 → full behaviour.
 
 ### 3.5 Controller (`wtr-max-fans-controller.service`)
 
-What stays from the private implementation (unchanged semantics, same tests): hybrid mode and the common write
-precondition; the control law (`curve(T, role, night)` with floor, silence, night, converge, max points; step 20 up / 4
-down; deadband 6 over 3 cycles; 255 applied whole); disk discovery of rotational ATA/SCSI disks by `lsblk` with stable
+What stays from the private implementation (rev. 5.1 semantics, same tests): hybrid mode and the common write
+precondition; the control law (`curve(T, role, night)` with the floor of the current mode, the day or night level at
+46 °C, convergence at 50 °C and 255 at 52 °C; step 20 up / 4 down; **deadband 6 over 3 cycles, and convergence: any
+gap, however small, is closed after `converge_cycles = 10` consecutive cycles with target < applied**; the counter
+resets whenever target ≥ applied and a descent that started continues to the target; 255 applied whole); disk
+discovery of rotational ATA/SCSI disks by `lsblk` with stable
 `/dev/disk/by-id` names; `smartctl -j -n standby -A` with `timeout 20`, only `temperature.current`; plausibility
 (5–90 °C, jump > 10 °C discarded, new base only below 50 °C, "suspicious" readings count for air but never for
 shutdown); 5 consecutive failures exclude a disk; blind for 3 cycles → 255; all in standby → floor; stopped-fan rule;
 `Type=notify` + `WatchdogSec=180`, `Restart=always`, `RestartSec=30`, `ExecStopPost` backup; exit 78 "driver or
 attribute missing" with zero writes.
 
+Why the convergence rule: on the maintainer's first night the deadband (6) kept the rear fans at 139 with a target of
+134 for six hours, because a gap of 5 never qualified for a descent. With `converge_cycles = 10` the worst case is
+≤ 5 PWM above target for 10 min plus two descent cycles. The "44↔45 °C oscillation costs at most one change" property
+still holds **provided the continuous stay at the lower level is shorter than `converge_cycles`**: alternating or short
+plateaus reset the counter before it reaches 10 and the gap (≤ 5) is below the deadband. Plateaus of ≥ 10 cycles at the
+lower level produce one descent of ≤ 5 PWM and one rise per period (≥ 20 min), each ≈ 30 rpm; accepted and tested as
+such.
+
 What changes:
 
 | Private | Product |
 |---|---|
 | channels `pwm3`/`pwm5` hard-coded | channels with role `base` / `disk-cage` from `hardware.ini`; a channel without `pwm_response = yes` is never written |
-| constants per channel in `/etc/wtr-ventiladores.conf` | per-role constants from the active profile (§3.7); `profile = custom` exposes them in `config.ini` |
+| constants per channel in `/etc/wtr-ventiladores.conf` | per-role constants from the active profile (§3.7), night floors clamped by `hardware.ini`'s `min_night_floor`; `profile = custom` exposes them in `config.ini` under the same strict invariants |
+| an invalid `.conf` visible only in a metric | invalid or incoherent configuration → factory values for the affected keys, `config_ok = false` in `status`/`status --json`, one journal line per change of the error set, metric `wtr_max_fans_config_ok`, contrib alert (§3.12); the controller state stays `ok` |
 | a city-specific holiday calendar copied from another service | §3.8 schedule |
 | `instance` labels, hostname check | none; metrics only if a textfile directory exists |
 | Spanish subcommands | `run`, `backup`, `status`, `decide --at`, `calibrate`, `restore-firmware` |
@@ -258,33 +290,63 @@ Changed:
 ### 3.7 Profiles and night mode
 
 All profiles share the temperature points `T_floor = 38`, `T_silence = 46`, `T_converge = 50`, `T_max = 52` (°C),
-the guard thresholds `54 / 50 / 58 / 50` and the step/deadband parameters. Values are PWM 0–255 (percent):
+the guard thresholds `54 / 50 / 58 / 50` and the step/deadband/convergence parameters. Each role × profile has four PWM
+values: `floor` (day, T ≤ 38 °C), `day46` (day at 46 °C), `night_floor` (night, T ≤ 38 °C) and `night46` (night at
+46 °C). Values are PWM 0–255 (percent):
 
 | Role | Parameter | `quiet` | `balanced` | `cool` |
 |---|---|---|---|---|
 | `disk-cage` | floor | 102 (40 %) | 115 (45 %) | 128 (50 %) |
 | `disk-cage` | day at 46 °C | 128 (50 %) | 153 (60 %) | 191 (75 %) |
-| `disk-cage` | night at 46 °C | 115 (45 %) | 153 (60 %) | 153 (60 %) |
+| `disk-cage` | **night floor** | 76 (30 %) | 89 (35 %) | 102 (40 %) |
+| `disk-cage` | night at 46 °C | 115 (45 %) | 128 (50 %) | 153 (60 %) |
 | `disk-cage` | backup (ExecStopPost) | 128 | 153 | 153 |
-| `base` | floor | 77 (30 %) | 77 (30 %) | 100 (39 %) |
+| `base` | floor | 64 (25 %) | 77 (30 %) | 100 (39 %) |
 | `base` | day at 46 °C | 77 (30 %) | 100 (39 %) | 128 (50 %) |
-| `base` | night at 46 °C | 77 (30 %) | 77 (30 %) | 100 (39 %) |
+| `base` | **night floor** | 51 (20 %) | 64 (25 %) | 77 (30 %) |
+| `base` | night at 46 °C | 64 (25 %) | 77 (30 %) | 100 (39 %) |
 | `base` | backup | 77 | 77 | 100 |
 
-`balanced` is the maintainer's measured comfort point (rear 60 %, bottom 30 % at night; disks 33–42 °C). `quiet`
-lowers only the ≤ 46 °C band (above it the curve converges to the day curve at 50 °C and reaches 255 at 52 °C, so the
-safety ceiling is identical); its rear floor of 40 % is one step above the 39 % the firmware applied on the
-maintainer's unit, where disks stayed at 38–46 °C. `cool` is for warm rooms or disks that sit above 46 °C on
-`balanced`; the status screen suggests it when the 24 h maximum exceeds 46 °C. No profile goes below 77 on `base`
-until a tachometer-verified lower floor exists (the private audit's N-I3 finding); `custom` lets an owner set every
-value in `config.ini` under `[curve.disk-cage]` / `[curve.base]`, validated against the invariants (floor ≥ 51,
-monotonic, night ≤ day ≤ 255).
+**Curve.** Day: `floor` up to 38 °C, linear to `day46` at 46 °C, linear to 255 at 52 °C. Night: `night_floor` up to
+38 °C, linear to `night46` at 46 °C, linear to the **day value at 50 °C** (`T_converge`), identical to the day curve
+from there. The night curve is therefore strictly below the day curve for every integer temperature up to 49 °C and
+equal from 50 °C: the ceiling and the guard do not know about night. Resulting values on `balanced` (the maintainer's
+unit, rev. 5.1): rear 115/134/144/153/187/221/255 by day and 89/109/118/128/175/221/255 by night at
+38/42/44/46/48/50/52 °C; bottom 77/89/94/100/152/203/255 by day and 64/71/74/77/140/203/255 by night. At 42 °C the
+night curve runs the rear fans 17 % slower and the bottom fan 29 % slower than the day curve on that unit. The steepest
+night ramp (46–50 °C) is `base` on `quiet`, 32.9 PWM/°C: at the fastest warming measured (0.6 °C/min) it asks for
+19.8 PWM/min, under the 20/cycle step, so the applied value follows the target without lag on every profile.
+
+**Invariants** (per role, checked on the profile tables in tests and on `custom` at every config read):
+`51 ≤ night_floor < floor ≤ day46 ≤ 255`, `night_floor ≤ night46 < day46`, `backup ≥ floor`,
+`converge_cycles ≥ deadband_cycles`. "Night = day" (`night46 = day46` or `night_floor = floor`) is a **configuration
+error**: the curve falls back to the profile's factory values, `config_ok = false`, and the message says "to run the
+day curve all day, set `mode = day`". The maintainer's first night with the controller is the reason: an equality that
+validation accepted silently cancelled the night mode without any metric noticing.
+
+**Per-unit clamp.** Calibration's `min_night_floor[role]` (§3.4 step 4) raises any `night_floor` below it, up to and
+never above `floor`; the clamp is reported in `status` ("base: night floor 51 → 64, tachometer") and in the journal once
+per start. A clamp may make `night_floor == floor` — always when `min_night_floor = none` (no candidate admitted, §3.4
+step 4) — and that is not the configuration error above, because `night46 < day46` still keeps the night curve
+strictly lower for every T > 38 °C, and `status` says why the floor is equal. The clamp resolves against the active
+profile at runtime, so changing the profile never needs a recalibration.
+
+`balanced` is the maintainer's measured comfort point (rear 60 % and bottom 39 % by day; rear 50 % and bottom 30 % at
+46 °C by night; night floors 89 = 708 rpm and 64 = 511 rpm, tachometer-stable with margin; disks 35–43 °C). `quiet`
+lowers each value by one 5 % step where a floor allows it (its bottom night floor of 51 is the Noctua datasheet
+minimum, 20 % PWM, and is admitted only where calibration measures it with margin; on the maintainer's unit it is
+clamped to 64); above 46 °C every profile converges to its day curve at 50 °C and reaches 255 at 52 °C, so the safety
+ceiling is identical. `cool` is for warm rooms or disks that sit above 46 °C on `balanced`; the status screen suggests
+it when the 24 h maximum exceeds 46 °C. No value below 51 exists in any profile, and no night floor is applied without
+the tachometer admission. `custom` lets an owner set every value in `config.ini` under `[curve.disk-cage]` /
+`[curve.base]`, validated against the invariants above.
 
 Night mode (`schedule.py`): `night = on|off`, `night_start = 21:00`, `night_end = 09:00`, optional
 `night_end_weekend = 10:00`, optional `holidays_file` (ISO dates, one per line, `#` comments; treated like weekends);
 evaluated every cycle in the system's local time zone (`/etc/localtime`), DST-safe by comparing wall-clock times.
-`mode = auto|day|night` forces. Transitions ramp with the normal step limits (night → day in ≤ 2 min, day → night in
-≤ 6 min on `balanced`).
+`mode = auto|day|night` forces. Transitions ramp with the normal step limits: day → night at 4 PWM per cycle after the
+3-cycle deadband wait (on `balanced` at 42 °C, rear 134 → 109 and bottom 89 → 71 in ≤ 9 cycles, no step larger than
+≈ 30 rpm on the rear fans); night → day at 20 per cycle (≤ 2 cycles).
 
 ### 3.8 Menu and CLI
 
@@ -319,8 +381,8 @@ wtr-max-fans 1.0.0 — AOOSTAR WTR MAX fan control
 
 | Path | Content | Notes |
 |---|---|---|
-| `/etc/wtr-max-fans/config.ini` | `[profile] name`; `[schedule]`; `[guard] action, full_air_c, release_c, shutdown_c, corroborate_c, caution_min`; `[alerts] mail, command`; `[metrics] textfile_dir = auto|off|<path>`; `[disks] devices = auto|<list>`; `[curve.*]` only for `custom` | written by the menu with `configparser`; re-read every cycle; invalid value → factory value + metric/alert, never a crash |
-| `/etc/wtr-max-fans/hardware.ini` | calibration output and firmware snapshot (§3.4) | written only by `calibrate`; the controller's start condition |
+| `/etc/wtr-max-fans/config.ini` | `[profile] name`; `[schedule]`; `[guard] action, full_air_c, release_c, shutdown_c, corroborate_c, caution_min`; `[alerts] mail, command`; `[metrics] textfile_dir = auto|off|<path>`; `[disks] devices = auto|<list>`; `[curve.*]` only for `custom` (`floor`, `day46`, `night_floor`, `night46`, `backup`; §3.7 invariants) | written by the menu with `configparser`; re-read every cycle; invalid value → factory value, `config_ok = false` in `status`, one journal line per change of the error set, metric and contrib alert (§3.12); never a crash, never a degraded controller state |
+| `/etc/wtr-max-fans/hardware.ini` | calibration output (channels, roles, PWM response, `min_night_floor` per role) and firmware snapshot (§3.4) | written only by `calibrate`; the controller's start condition |
 | `/etc/wtr-max-fans/holidays.txt` | optional | not shipped; example in `config/` |
 | `/etc/systemd/system/wtr-max-fans-{controller,guard}.service` | units | hardening as in the private spec (`ProtectSystem=strict`, `PrivateNetwork=yes`, `DevicePolicy=closed` + `DeviceAllow=block-sd rw`, capability bounding set, `SystemCallFilter=@system-service`); the guard adds `CAP_SYS_BOOT` only when `action = shutdown` (a drop-in written by the menu) |
 | `/usr/local/sbin/wtr-max-fans`, `/usr/local/lib/wtr-max-fans/` | program | FHS `/usr/local` |
@@ -379,6 +441,7 @@ boot regardless.
 | Firmware re-arms its curve at runtime (not observed) | `prepare`/cycle corrects `enable` and `auto_point2_temp` drift (counter `corrections_total`); if drift persists > 10 corrections/h → alert "firmware fights the controller" and the status screen says so | **new** |
 | More or fewer fans, swapped headers | roles and PWM response from calibration; nothing assumed | **new** |
 | Stock DC fans | classified "does not respond"; guard only; the menu says control is unavailable and why | **new** |
+| PWM fan whose tachometer is unstable or too slow at every candidate night floor (§3.4 step 4) | `min_night_floor = none`; night floor clamped to the day floor of the active profile; night still lower above 38 °C through `night46 < day46`; the stopped-fan rule is unchanged (3 cycles at 0 rpm with applied ≥ floor), so a fan that cannot run at a profile's day floor is reported as stopped — the wizard therefore recommends a profile whose day floor is above the highest rejected candidate (`balanced` or `cool`); `status` and the journal say so | **new** |
 | 1 disk, or disks that report no `temperature.current` | shutdown degrades to alert; disks without the attribute are excluded; none left → blind | **new** |
 | Other disk models with different limits | thresholds are below every consulted specification (60 °C hard limit); `custom` allows lower, never higher than 58 for shutdown | **new** |
 | Another controller installed later (`fancontrol`) | drift corrections + alert as above; install refused up front | **new** |
@@ -390,10 +453,15 @@ boot regardless.
 ### 3.12 Observability
 
 Metrics (`wtr_max_fans_*`, same shape as the private `wtr_*` series: disk temperatures by stable id, max, PWM
-target/applied/read by channel and role, mode, state, guard state, corrections, last cycle timestamp) written
-atomically only when a textfile directory exists. `contrib/prometheus/rules.yml` + `rules.test.yml` carry the seven
-alerts of the private deployment with no `instance` label pre-filled; `promtool check rules` and `promtool test
-rules` run in CI. `wtr-max-fans status --json` gives the same data without Prometheus.
+target/applied/read by channel and role, **the day-curve target at the current temperature** (`pwm_target_day`, so
+"night is lower than day" is one comparison, not an opinion), mode, state, `config_ok`, guard state, corrections, last
+cycle timestamp) written atomically only when a textfile directory exists. `contrib/prometheus/rules.yml` +
+`rules.test.yml` carry the **eight** alerts of the private deployment (the seven of rev. 4 plus `WtrMaxFansConfigInvalid`,
+warning, `config_ok == 0` for 10 min) with no `instance` label pre-filled; `promtool check rules` and `promtool test
+rules` run in CI. Prometheus is optional: `wtr-max-fans status` shows the same facts on screen (profile, mode, per-
+channel target/day-target/applied, clamps, `config: ok` or `config: INVALID — <reason>`), `status --json` gives them to
+scripts, and the controller writes one journal line per cycle (`T=42 mode=night rear target=109 day=134 applied=109
+bottom target=71 day=89 applied=71 state=ok`) plus one line whenever the set of configuration errors changes.
 
 ### 3.13 Security
 
@@ -411,10 +479,19 @@ tree with every attribute (variants without `pwm5_auto_start`, without `fan4_inp
 `/sys/class/dmi/id`, fake `/etc`, `/run`, `/var`; fake `smartctl`, `lsblk`, `systemctl`, `shutdown`, `sendmail`,
 `dkms`, `mokutil`, `whiptail` on `PATH` driven by scenario files that record every call. Cases: the 17 of the private
 spec (law, step/deadband, calendar transitions, readings, backup, stopped fan, orphan step file, calibrate lock,
-guard steps 1–5, actions chain, metrics format) plus: G1–G5 gates with each failure; calibration classification
-(PWM / DC / no tachometer) with the 5/6 rule and the snapshot restored on exception; role assignment defaults and
-overrides; the profile table (exact values at 38/42/46/48/50/52 for each role × profile × day/night, continuity and
-monotonicity); `custom` validation; shutdown degrade with one disk; `alert` default performs no power action;
+guard steps 1–5, actions chain, metrics format) and the rev. 5.1 additions (a gap below the deadband converges after
+10 cycles — 139 over 134 reaches 134 at cycle 11; the counter resets when the target catches up; the 44↔45 °C
+oscillation costs at most one change, alternating and with 3+3 plateaus; a 12+12 plateau costs ≤ 4 changes in 48
+cycles, each ≤ 5 PWM; night below the day floor; `pwm_target_day` published; an invalid configuration keeps
+`state = ok` with `config_ok = false`) plus: G1–G5 gates with each failure; calibration classification (PWM / DC / no
+tachometer) with the 5/6 rule and the snapshot restored on exception; floor admission (a channel whose tachometer
+reads 0, drifts > 5 % or stays under 25 % of `rpm_full` at 51 is admitted at 64; monotone admission skips the higher
+candidates; the clamp shows in `status`); role assignment defaults and overrides; the profile table (exact values at
+38/42/44/46/48/50/52 for each role × profile × day/night; continuity; monotonicity; **night strictly below day for
+every integer T in 30–49 and equal from 50** on every profile; every night ramp 46–50 °C under 20 PWM/min at 0.6
+°C/min; all invariants of §3.7 hold on the three shipped tables); `custom` validation including `night46 = day46`
+and `night_floor = floor` rejected with the `mode = day` message; day → night transition on both roles at ≤ 4/cycle
+and night → day at ≤ 20/cycle; shutdown degrade with one disk; `alert` default performs no power action;
 firmware snapshot restore on uninstall; unreadable holidays → day; INI round-trip through the menu's writers;
 non-TTY refusal; `report` bundle contents. Run on the remote executor, never on the Mac:
 `qf-test up --generic --auto --allow-qf-infra` → `qf-test exec -- python3 -m pytest -q tests` → `qf-test artifacts`
@@ -438,7 +515,10 @@ before owners update.
    the product install (G4 now passes), calibrate (expected: `pwm5` PWM-controlled, role `disk-cage`; `pwm3`
    PWM-controlled, role `base`; `pwm4` no tachometer; `pwm2` classified and skipped), choose `balanced`.
 4. Verify the private spec's H4–H7 and H10 equivalents (prepare values, kill -9, `modprobe -r`, reboot) and 24 h of
-   disk temperatures ≤ 46 °C with the night ramp observed.
+   disk temperatures ≤ 46 °C with the night ramp observed: from 21:10 on, `applied < pwm_target_day` on both roles in
+   ≥ 95 % of the samples and never 12 min in a row otherwise; no `applied > target` for more than 12 cycles; rear
+   tachometer ≥ 650 rpm and bottom ≥ 450 rpm at all times (never 0); the maintainer confirms the 21:15 sound is lower
+   than the 20:45 one.
 5. Switch the home alert rules to `wtr_max_fans_*` (a change in the maintainer's private repository, outside this
    product); the private files stay in that repository as history until the product is tagged `v1.0.0`.
 6. **Rollback** (≤ 2 min): `wtr-max-fans uninstall`, then the private `instalar.sh instalar` and DKMS reinstall as
@@ -476,6 +556,9 @@ before owners update.
 | **One combined daemon** | The guard must survive controller bugs; two processes with separate restart policies and capability sets, as audited. |
 | **Go or Rust rewrite** | Toolchain or binary distribution for a ≤ 3 000-line program; Python ≥ 3.11 is on every target. |
 | **Allowing non-WTR-MAX boards with the same chip in v1** | No calibration evidence from any such board; the gate stays closed and `report` collects the evidence (grill Q2). |
+| **A single floor per role shared by day and night (`night ≤ day`), as in the private rev. 4 and the first draft of this ADR** | The maintainer's first night (2026-10-13/14) ran `night` for 12 hours with no audible change: the rear night level equalled the day level and the bottom night level equalled the shared floor, both legal under `≤`. Strict invariants and a night floor per role make that state a configuration error instead of a valid profile. |
+| **Deadband alone (6 PWM over 3 cycles) without a convergence rule** | On the same night the rear fans sat at 139 with a target of 134 for 6 hours: a gap of 5 never qualifies. With `converge_cycles = 10` the worst case is 12 min, and the oscillation property survives with a stated precondition (§3.5). |
+| **Shipping `base` night floor 51 as the default on the maintainer's unit** | Stable at 274 rpm but 34 rpm above the datasheet's −20 % bound; three 0-rpm cycles would send the rear fans to 255 with a critical alert at 3 a.m. Floor admission (≥ 25 % of `rpm_full`) keeps 51 only where a unit measures it with margin. |
 
 ## 5. Consequences
 
@@ -506,3 +589,10 @@ before owners update.
 ## 7. Status
 
 **proposed** — awaiting the Owner's direction approval (phase 2 exit) and the adversarial audit (phase 3).
+
+History:
+
+- 2026-10-13: first draft from the grill and the private spec revision 4.
+- 2026-10-14: night curves made strictly lower than day after the maintainer's first night showed no audible change
+  (private spec rev. 5.1): night floor per role × profile, strict invariants, convergence rule in the smoothing law,
+  tachometer floor admission in calibration, `pwm_target_day` and `config_ok` observability, eighth contrib alert.

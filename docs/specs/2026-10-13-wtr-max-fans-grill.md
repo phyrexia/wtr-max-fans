@@ -34,6 +34,12 @@ stop the disk-cage fans entirely while the disks pass 50 °C.
   rear fans; board thermistors moved 1–2 °C while disks moved 3–8 °C; rear fans at 60 % PWM (153/255) are comfortable
   and 75 % adds noise without lowering disk temperature; bottom fan at 30 % (77/255) at night is not noticed; with
   those values the six 4 TB disks sit at 33–42 °C.
+  *Note (2026-10-14):* "not noticed" was measured against the daytime 39 % (100/255), not as a night level. The first
+  night with the controller (rear 60 % and bottom 30 % both day and night) brought no audible change, and the
+  maintainer asked for a real night mode. The private spec rev. 5.1 and ADR 001 §3.7 now give each role a night floor
+  of its own (rear 89 = 708 rpm, bottom 64 = 511 rpm, tachometer-verified) and a night level at 46 °C strictly below
+  the day level (rear 128, bottom 77); 51 on the bottom fan (274 rpm) was measured stable but rejected for lack of
+  margin over the datasheet minimum.
 - **Chip facts** (read on that unit): ITE IT8613E at Super-I/O port `0x2E`, environment controller at base `0xA30`;
   mainline 7.0 does not know the chip and with `force_id=0x8622` misreports `pwm4`/`pwm5`; the per-channel register
   base+3 is both the manual duty and the Start PWM of the automatic curve; if a controller dies in manual mode the chip
