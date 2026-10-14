@@ -60,7 +60,7 @@ The chip check is never overridable.
 - **Three profiles:** `quiet`, `balanced` and `cool`. The same temperature points and the same safety ceiling in all three. The table is in the next section.
 - **Night mode.** A local-time window, an optional later end on weekends, and an optional holiday file.
 - **Thermal guard.** A separate service that turns the fans to full air when a disk gets hot. Shutdown is off unless you enable it. See [Safety](#safety).
-- **Guided calibration.** Finds which fan is which, and whether each one responds to PWM. Restores the firmware values it touched when it is done. Each night floor is admitted per fan with the tachometer: a floor is kept only if the fan runs steadily and with margin, otherwise the next higher one is used.
+- **Guided calibration.** Finds which fan is which, and whether each one responds to PWM. Restores the firmware values it touched when it is done. Each night floor is admitted per fan with the tachometer: a floor is kept only if the fan runs steadily and with margin, otherwise the next higher one is used. If none passes, that fan keeps its day floor at night (the night curve is still lower above 38 °C), and the wizard and the status screen say so.
 - **Noise test.** Plays each profile's night level at 42 °C and asks whether it is acceptable. It then proposes the loudest acceptable profile.
 - **Clean uninstall.** Restores the firmware values recorded at calibration, then removes the units, the module and the files it installed.
 - **Optional Prometheus metrics,** written only when the textfile collector directory already exists.
