@@ -247,6 +247,7 @@ the module the fans fall back to the firmware curve and the controller stays idl
 Copy the `v0/` directory to the machine (for example to `/root/wtr-max-fans/v0`) and, from there:
 
 ```bash
+# instalar.sh refuses to run unless "hostname -s" is wtrmax: rename the host or edit that check (see Limitations of v0).
 bash instalar.sh guardia          # 1. the guard first: it protects from this moment on
 bash instalar.sh probar-sandbox   #    checks smartctl and a dry shutdown (-k) under the unit's sandbox
 bash instalar.sh simular          # 2. the controller in --simular: one journal line per cycle, zero writes
@@ -316,6 +317,43 @@ A journal line reads `T=42 modo=noche sys obj=71 dia=89 apl=71 sata obj=109 dia=
 - **Metrics**: `/var/lib/prometheus/node-exporter/wtr_ventiladores.prom` and `wtr_guardia_discos.prom` (targets, day
   targets, applied values, state, `config_ok`, guard state). The eight example alerts in
   [`contrib/prometheus/`](contrib/prometheus/) need `instance="wtr-max:9100"` replaced with your node_exporter target.
+
+  `WtrVentiladorParado` matches fans by a `ventilador` label that node_exporter does not emit; add this to the
+  scrape job of your WTR MAX in `prometheus.yml` (channel names as in the BIOS):
+
+  ```yaml
+  metric_relabel_configs:
+    # it87 IT8613E: fan2=cpu, fan3=sys (base), fan4=mem (2-wire, no tachometer), fan5=sata (rear, disk cage);
+    # temp1=board-sys, temp2=board-sata, temp3=cpu.
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan2'
+      target_label: ventilador
+      replacement: cpu
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan3'
+      target_label: ventilador
+      replacement: sys
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan4'
+      target_label: ventilador
+      replacement: mem
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan5'
+      target_label: ventilador
+      replacement: sata
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;temp1'
+      target_label: sonda
+      replacement: placa-sys
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;temp2'
+      target_label: sonda
+      replacement: placa-sata
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;temp3'
+      target_label: sonda
+      replacement: cpu
+  ```
 
 <details>
 <summary><b>Calibrating a floor on your fans</b></summary>
@@ -426,7 +464,7 @@ in [`tasks/todo.md`](tasks/todo.md).
 
 ## License
 
-- Everything except `driver/` is **Apache-2.0** ([`LICENSE`](LICENSE)); redistributions must keep the
+- Everything except the patch `driver/0001-it87-expose-pwm4-6-auto-start.patch` is **Apache-2.0** ([`LICENSE`](LICENSE)); redistributions must keep the
   [`NOTICE`](NOTICE) file.
 - `driver/0001-it87-expose-pwm4-6-auto-start.patch` modifies the GPL-2.0 `it87` driver and is **GPL-2.0-only**
   ([`driver/COPYING`](driver/COPYING)). The driver and the services are separate programs that only share sysfs.

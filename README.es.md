@@ -253,6 +253,7 @@ resolverlo: sin el módulo los ventiladores vuelven a la curva del firmware y el
 Copia el directorio `v0/` al equipo (por ejemplo a `/root/wtr-max-fans/v0`) y, desde ahí:
 
 ```bash
+# instalar.sh se niega a correr si "hostname -s" no es wtrmax: renombra el host o edita esa comprobación (ver Limitaciones de v0).
 bash instalar.sh guardia          # 1. primero la guardia: protege desde este momento
 bash instalar.sh probar-sandbox   #    comprueba smartctl y un apagado en seco (-k) bajo el sandbox de la unidad
 bash instalar.sh simular          # 2. el controlador en --simular: una línea de journal por ciclo, cero escrituras
@@ -324,6 +325,41 @@ noche, `apl` por debajo de `dia` en los dos canales es «más silencioso que de 
   objetivos diurnos, aplicados, estado, `config_ok`, estado de la guardia). Las ocho alertas de ejemplo de
   [`contrib/prometheus/`](contrib/prometheus/) necesitan reemplazar `instance="wtr-max:9100"` por tu target del
   node_exporter.
+
+  `WtrVentiladorParado` empareja los ventiladores por una etiqueta `ventilador` que node_exporter no emite; agrega esto al job que raspa tu WTR MAX en `prometheus.yml` (nombres de canal como en la BIOS):
+
+  ```yaml
+  metric_relabel_configs:
+    # it87 IT8613E: fan2=cpu, fan3=sys (base), fan4=mem (2 hilos, sin tacómetro), fan5=sata (traseros, jaula de discos); temp1=placa-sys, temp2=placa-sata, temp3=cpu.
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan2'
+      target_label: ventilador
+      replacement: cpu
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan3'
+      target_label: ventilador
+      replacement: sys
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan4'
+      target_label: ventilador
+      replacement: mem
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;fan5'
+      target_label: ventilador
+      replacement: sata
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;temp1'
+      target_label: sonda
+      replacement: placa-sys
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;temp2'
+      target_label: sonda
+      replacement: placa-sata
+    - source_labels: [chip, sensor]
+      regex: 'platform_it87_2608;temp3'
+      target_label: sonda
+      replacement: cpu
+  ```
 
 <details>
 <summary><b>Calibrar un piso con tus ventiladores</b></summary>
@@ -440,7 +476,7 @@ contra headers de Debian y Proxmox VE. Los pendientes se siguen en [`tasks/todo.
 
 ## Licencia
 
-- Todo salvo `driver/` es **Apache-2.0** ([`LICENSE`](LICENSE)); las redistribuciones deben conservar el archivo
+- Todo salvo el parche `driver/0001-it87-expose-pwm4-6-auto-start.patch` es **Apache-2.0** ([`LICENSE`](LICENSE)); las redistribuciones deben conservar el archivo
   [`NOTICE`](NOTICE).
 - `driver/0001-it87-expose-pwm4-6-auto-start.patch` modifica el driver `it87`, que es GPL-2.0, y es **GPL-2.0-only**
   ([`driver/COPYING`](driver/COPYING)). El driver y los servicios son programas separados que solo comparten sysfs.
