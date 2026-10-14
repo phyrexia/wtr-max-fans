@@ -1,0 +1,37 @@
+From 74abbd0000b9dbf02af354f3232f1cd310154514 Mon Sep 17 00:00:00 2001
+From: "WTR MAX (wtr-max-fans)" <root@wtrmax.invalid>
+Date: Tue, 13 Oct 2026 16:48:03 +0200
+Subject: [PATCH] hwmon: (it87) expose pwm4..6_auto_start on newer autopwm
+ chips
+
+it87_auto_pwm_is_visible() maps the six pwm4..6 attributes to attribute
+indexes 4..9 of the eleven-entry pwm1..3 layout. pwm4..6 have no
+auto_point4_temp, so auto_start and auto_slope must map to 9 and 10, not
+8 and 9. With the old mapping, newer autopwm chips hide pwmN_auto_start
+(index 8 is treated as auto_point4_temp) for pwm4..6, while old autopwm
+chips would show it.
+
+Seen on an IT8613E (AOOSTAR WTR MAX): pwm4_auto_start and
+pwm5_auto_start were missing while pwm4_auto_slope and pwm5_auto_slope
+were present.
+---
+ it87.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/it87.c b/it87.c
+index 56148f2..885ca5b 100644
+--- a/it87.c
++++ b/it87.c
+@@ -5518,6 +5518,9 @@ static umode_t it87_auto_pwm_is_visible(struct kobject *kobj,
+ 	if (index >= 33) {	/* pwm 4..6 */
+ 		i = (index - 33) / 6 + 3;
+ 		a = (index - 33) % 6 + 4;
++		/* pwm4..6 have no auto_point4_temp: start/slope are 9/10 */
++		if (a >= 8)
++			a++;
+ 	}
+ 
+ 	if (!(data->has_pwm & BIT(i)))
+-- 
+2.47.3
+

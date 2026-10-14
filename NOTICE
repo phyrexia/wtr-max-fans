@@ -1,0 +1,12 @@
+wtr-max-fans
+Copyright 2026 Gabriel González Pineda (https://github.com/phyrexia)
+
+This product includes software written by Gabriel González Pineda.
+Redistributions and derivative works must retain this NOTICE file (Apache License 2.0, section 4(d)).
+
+driver/0001-it87-expose-pwm4-6-auto-start.patch modifies the out-of-tree it87 driver
+(https://github.com/frankcrawford/it87), licensed under GPL-2.0; the patch is licensed under
+GPL-2.0-only (see driver/COPYING).
+
+"AOOSTAR" and "WTR MAX" identify the hardware descriptively. This project is not affiliated with,
+sponsored by or endorsed by AOOSTAR.

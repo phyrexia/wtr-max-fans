@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: 2026 Gabriel González Pineda <https://github.com/phyrexia>
+# SPDX-License-Identifier: Apache-2.0
+# Alertas del control de ventiladores (wtr-ventiladores) y de la guardia térmica de discos
+# (wtr-guardia-discos) del WTR MAX. Documentación: README del repositorio wtr-max-fans
+# (https://github.com/phyrexia/wtr-max-fans).
+#
+# Replace instance="wtr-max:9100" with your node-exporter target (reemplaza instance="wtr-max:9100"
+# por el target del node-exporter del WTR MAX, aquí y en el .test.yml).
+#
+# Todas las series se filtran por instance: otro exportador que vea el sysfs del host (por ejemplo,
+# un contenedor en el mismo equipo) publica las mismas series node_hwmon_*. Las etiquetas
+# ventilador/sonda de node_hwmon_* las pone metric_relabel_configs en prometheus.yml (ejemplo en el
+# README). ventilador="mem" (2 hilos) no entra.
+#
+# Cuando una alerta junta dos condiciones con `or`, cada lado va agregado `by (instance)`: así las
+# dos ramas tienen el mismo conjunto de etiquetas y la alerta sale una sola vez.
+#
+# Si el archivo está montado en el contenedor de Prometheus como bind mount de un solo archivo,
+# editarlo in-place (nunca `mv` encima) y recargar con SIGHUP.
+
+groups:
+  - name: wtr-ventiladores
+    rules:
+
+      - alert: WtrDiscoCaliente
+        # Las lecturas sospechosas (>= 50 tras un salto > 10 °C) no cuentan; smartmon (cada 15 min,
+        # sólo el atributo 194) es la segunda fuente y vale aunque el controlador esté muerto.
+        expr: >-
+          (
+            max by (instance) (
+              wtr_disco_temperatura_celsius{instance="wtr-max:9100"}
+              unless on(instance, disco)
+              (wtr_disco_lectura_sospechosa{instance="wtr-max:9100"} == 1)
+            ) > 50
+          )
+          or on(instance)
+          (
+            max by (instance) (
+              smartmon_temperature_celsius_raw_value{instance="wtr-max:9100",type="sat",smart_id="194"}
+            ) > 50
+          )
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          resumen: >-
+            WTR MAX: un disco lleva 15 min sobre 50 °C ({{ $value }} °C). El controlador ya va a 80 %
+            o más; revisar polvo, ventiladores y temperatura ambiente.
+
+      - alert: WtrVentiladorParado
+        expr: >-
+          node_hwmon_fan_rpm{instance="wtr-max:9100",ventilador=~"sys|sata"} == 0
+          and on(instance, ventilador)
+          wtr_ventiladores_pwm_aplicado{instance="wtr-max:9100"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          resumen: >-
+            WTR MAX: el ventilador {{ $labels.ventilador }} marca 0 rpm con PWM aplicado. Revisar el
+            ventilador, el cable o el header; el otro canal ya está en 255.
+
+      - alert: WtrControladorCaido
+        expr: >-
+          (
+            time() - max by (instance) (
+              node_textfile_mtime_seconds{instance="wtr-max:9100",file=~"(.*/)?wtr_ventiladores\\.prom"}
+            ) > 180
+          )
+          or on(instance)
+          (
+            max by (instance) (wtr_ventiladores_estado{instance="wtr-max:9100",estado="ok"}) == 0
+          )
+          or on(instance)
+          absent(node_textfile_mtime_seconds{instance="wtr-max:9100",file=~"(.*/)?wtr_ventiladores\\.prom"})
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          resumen: >-
+            WTR MAX: wtr-ventiladores no está controlando (métrica vieja o ausente, o estado distinto de ok:
+            ciego, sin_driver, ventilador_parado, error_escritura o simulando). Los ventiladores quedan
+            en el respaldo (153/77), en 255 si está ciego, o con la BIOS si falta el parche del driver.
+            journalctl -u wtr-ventiladores.
+
+      - alert: WtrConfiguracionInvalida
+        # config_ok=0: valor inválido o curva incoherente en /etc/wtr-ventiladores.conf. El controlador
+        # sigue vivo y en estado ok con los valores de fábrica para lo afectado, así que
+        # WtrControladorCaido no la cubre (enmienda rev. 5.1, D16). 10 min: no avisa durante una
+        # edición en curso.
+        expr: wtr_ventiladores_config_ok{instance="wtr-max:9100"} == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          resumen: >-
+            WTR MAX: /etc/wtr-ventiladores.conf tiene un valor inválido o una curva incoherente; el
+            servicio corre con los valores de fábrica para lo afectado. journalctl -u wtr-ventiladores
+            | grep config: dice qué línea; corregir el archivo (se relee en el ciclo siguiente). Tras una
+            actualización suele ser el .conf viejo sin migrar (instalar.sh instalar).
+
+      - alert: WtrGuardiaDiscosEscalon
+        expr: wtr_guardia_discos_estado{instance="wtr-max:9100"} == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          resumen: >-
+            WTR MAX: la guardia puso todo el aire (un disco a 54 °C o más, sostenido 2 min).
+
+      - alert: WtrGuardiaDiscosApagado
+        # Apagado en curso o pendiente de reconocer, disco aislado (3) o guardia ciega (4). La
+        # cautela (5) tiene su propia alerta.
+        expr: >-
+          (max by (instance) (wtr_guardia_discos_apagado_pendiente{instance="wtr-max:9100"}) == 1)
+          or on(instance)
+          ((max by (instance) (wtr_guardia_discos_estado{instance="wtr-max:9100"}) >= 2) < 5)
+        labels:
+          severity: critical
+        annotations:
+          resumen: >-
+            WTR MAX: la guardia de discos apaga o apagó el host, aísla un disco a 58 °C sin
+            corroborar, o está ciega (estado {{ $value }}; 1 = apagado pendiente). Revisar la causa;
+            tras un apagado, wtr-guardia-discos reconocer.
+
+      - alert: WtrGuardiaDiscosCautela
+        expr: wtr_guardia_discos_estado{instance="wtr-max:9100"} == 5
+        labels:
+          severity: warning
+        annotations:
+          resumen: >-
+            WTR MAX: arranque tras un apagado térmico; durante 30 min la guardia no apaga salvo con
+            tres discos corroborando. Revisar la causa y ejecutar wtr-guardia-discos reconocer.
+
+      - alert: WtrGuardiaDiscosCaida
+        # Sin métrica fresca (o sin métrica: absent, también si cae el node_exporter del host) no hay
+        # apagado de emergencia; un canal en manual de emergencia (falta
+        # pwmN_auto_start) sigue al 100 % hasta reconstruir el DKMS y `reconocer`; con ACCION=simulacro
+        # la guardia no apaga.
+        expr: >-
+          (
+            time() - max by (instance) (
+              node_textfile_mtime_seconds{instance="wtr-max:9100",file=~"(.*/)?wtr_guardia_discos\\.prom"}
+            ) > 180
+          )
+          or on(instance)
+          (max by (instance) (wtr_guardia_discos_manual_emergencia{instance="wtr-max:9100"}) == 1)
+          or on(instance)
+          (max by (instance) (wtr_guardia_discos_simulacro{instance="wtr-max:9100"}) == 1)
+          or on(instance)
+          absent(node_textfile_mtime_seconds{instance="wtr-max:9100",file=~"(.*/)?wtr_guardia_discos\\.prom"})
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          resumen: >-
+            WTR MAX: la guardia de discos no protege (métrica vieja o ausente, ACCION=simulacro) o un canal quedó
+            en manual de emergencia al 100 % por falta del parche: reconstruir el DKMS con el parche y
+            wtr-guardia-discos reconocer. journalctl -u wtr-guardia-discos.

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="t">
+<title id="t">wtr-max-fans — fans that follow your disks, quiet at night, guarded at 54 °C</title>
+<style>text{font-family:system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;}</style>
+<rect width="1200" height="300" fill="#ffffff"/>
+<rect x="12" y="12" width="1176" height="276" rx="20" fill="#f6f8fa" stroke="#d0d7de"/>
+<path d="M 1105 58 a 24 24 0 1 0 22 34 a 19 19 0 1 1 -22 -34 Z" fill="#6250d6" opacity="0.9"/>
+<circle cx="150" cy="150" r="82" fill="#ddebfb" stroke="#2a78d6" stroke-width="3"/>
+<g transform="rotate(0 150 150)"><path d="M 150 150 C 162.3 121.3, 195.1 88.5, 159.84 82.76 C 129.5 77.84, 121.3 113.1, 150 150 Z" fill="#2a78d6"/></g>
+<g transform="rotate(72 150 150)"><path d="M 150 150 C 162.3 121.3, 195.1 88.5, 159.84 82.76 C 129.5 77.84, 121.3 113.1, 150 150 Z" fill="#2a78d6"/></g>
+<g transform="rotate(144 150 150)"><path d="M 150 150 C 162.3 121.3, 195.1 88.5, 159.84 82.76 C 129.5 77.84, 121.3 113.1, 150 150 Z" fill="#2a78d6"/></g>
+<g transform="rotate(216 150 150)"><path d="M 150 150 C 162.3 121.3, 195.1 88.5, 159.84 82.76 C 129.5 77.84, 121.3 113.1, 150 150 Z" fill="#2a78d6"/></g>
+<g transform="rotate(288 150 150)"><path d="M 150 150 C 162.3 121.3, 195.1 88.5, 159.84 82.76 C 129.5 77.84, 121.3 113.1, 150 150 Z" fill="#2a78d6"/></g>
+<circle cx="150" cy="150" r="13.120000000000001" fill="#ffffff" stroke="#2a78d6" stroke-width="3"/>
+<path d="M 250 113.1 q 16.099999999999998 -8 46 0" fill="none" stroke="#2a78d6" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+<path d="M 250 150 q 22.4 -8 64 0" fill="none" stroke="#2a78d6" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+<path d="M 250 186.9 q 16.099999999999998 -8 46 0" fill="none" stroke="#2a78d6" stroke-width="3" stroke-linecap="round" opacity="0.9"/>
+<text x="330" y="128" font-size="62" font-weight="800" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >wtr-max-fans</text>
+<text x="332" y="170" font-size="22" font-weight="500" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Fans that follow your disks. Quiet at night. Guarded at 54 °C.</text>
+<rect x="332" y="200" width="171" height="30" rx="12" fill="#ddebfb" stroke="#2a78d6" stroke-width="1"/><text x="417.5" y="220.22" font-size="14.5" font-weight="600" text-anchor="middle" fill="#2a78d6" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >disk-driven curves</text>
+<rect x="515" y="200" width="154" height="30" rx="12" fill="#e9e6fb" stroke="#6250d6" stroke-width="1"/><text x="592.0" y="220.22" font-size="14.5" font-weight="600" text-anchor="middle" fill="#6250d6" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >day / night mode</text>
+<rect x="681" y="200" width="230" height="30" rx="12" fill="#fbe3e3" stroke="#d03b3b" stroke-width="1"/><text x="796.0" y="220.22" font-size="14.5" font-weight="600" text-anchor="middle" fill="#d03b3b" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >independent thermal guard</text>
+<text x="332" y="262" font-size="14" font-weight="normal" text-anchor="start" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >ITE IT8613E · patched it87 driver via DKMS · the chip stays in automatic mode, only its Start PWM moves</text>
+</svg>

@@ -1,0 +1,771 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Gabriel González Pineda <https://github.com/phyrexia>
+# SPDX-License-Identifier: Apache-2.0
+"""Guardia térmica de los discos del WTR MAX: 54 °C todo el aire, 58 °C apagado corroborado.
+
+Independiente de wtr-ventiladores (no importa nada de él): si el controlador muere o falta el
+parche del driver, la guardia sigue protegiendo. Cada ciclo (30 s) lee la temperatura SMART de los
+HDD y aplica la escalera de la spec §5.2:
+
+  0 vigilando
+  1 todo el aire     algún disco >= ESCALON_C (54): pwmN_auto_start=255 en SYS y SATA y el archivo
+                     /run/wtr-guardia-discos/escalon refrescado cada ciclo; se retira bajo RETIRO_C (50)
+  2 apagando         un disco >= APAGADO_C (58) en 3 lecturas seguidas y otro >= CORROBORA_C (50) en
+                     al menos 2 de ellas, sin lecturas sospechosas: marcador, métrica y shutdown -h +1
+  3 disco aislado    un disco >= 58 en 3 lecturas seguidas sin corroborar: todo el aire, sin apagar
+  4 ciega            sin ninguna lectura en CICLOS_CIEGA ciclos (5 min): todo el aire, sin apagar
+  5 cautela          arranque < CAUTELA_MIN (30) tras un apagado de la guardia: no apaga salvo que
+                     corroboren tres discos
+
+Si falta pwmN_auto_start (DKMS sin el parche), el último recurso es pwmN_enable=0 (255 en manual).
+Ese canal se queda así, con manual_emergencia=1, hasta que un administrador reconstruya el DKMS y
+ejecute `reconocer`. La guardia nunca muere por una acción fallida: cada escritura y cada orden
+va en su propio try.
+
+Uso:
+  wtr-guardia-discos [vigilar]      bucle del servicio (Type=notify)
+  wtr-guardia-discos reconocer      archiva el marcador de apagado y limpia manual_emergencia
+  wtr-guardia-discos probar-sandbox comprueba smartctl y shutdown -k bajo el sandbox de la unidad
+
+Configuración: /etc/wtr-guardia-discos.conf (se relee en cada ciclo). ACCION=simulacro registra
+el apagado sin ejecutarlo. Documentación: README del repositorio wtr-max-fans
+(https://github.com/phyrexia/wtr-max-fans).
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+
+CONF = Path(os.environ.get("WTR_GUARDIA_CONF", "/etc/wtr-guardia-discos.conf"))
+HWMON_GLOB = os.environ.get("WTR_GUARDIA_HWMON", "/sys/devices/platform/it87.2608/hwmon/hwmon*")
+METRICA = Path(os.environ.get("WTR_GUARDIA_METRICA", "/var/lib/prometheus/node-exporter/wtr_guardia_discos.prom"))
+RUN = Path(os.environ.get("WTR_GUARDIA_RUN", "/run/wtr-guardia-discos"))
+ESTADO_DIR = Path(os.environ.get("WTR_GUARDIA_ESTADO", "/var/lib/wtr-guardia-discos"))
+BYID = Path(os.environ.get("WTR_GUARDIA_BYID", "/dev/disk/by-id"))
+SMARTCTL = os.environ.get("WTR_GUARDIA_SMARTCTL", "smartctl")
+LSBLK = os.environ.get("WTR_GUARDIA_LSBLK", "lsblk")
+SHUTDOWN = os.environ.get("WTR_GUARDIA_SHUTDOWN", "shutdown")
+SYSTEMCTL = os.environ.get("WTR_GUARDIA_SYSTEMCTL", "systemctl")
+SYSRQ = Path(os.environ.get("WTR_GUARDIA_SYSRQ", "/proc/sysrq-trigger"))
+PROC_STAT = Path(os.environ.get("WTR_GUARDIA_PROC_STAT", "/proc/stat"))
+
+CHIP = "it8613"
+CANALES = ("pwm3", "pwm5")
+SMARTCTL_TIMEOUT_S = 20
+REINTENTO_APAGADO_S = 300     # tras programar el apagado, no se repite antes (deja actuar a shutdown -c)
+SYSRQ_PAUSA_S = 5             # entre el sync de emergencia (s) y el apagado inmediato (o)
+MARCADOR = "ultimo-apagado"
+EXCEPCIONES = (OSError, subprocess.SubprocessError, ValueError)
+
+
+def log(msg: str) -> None:
+    print(f"wtr-guardia-discos: {msg}", flush=True)
+
+
+# --- configuración -------------------------------------------------------------------------------
+
+DEFECTO = {"ACCION": "apagar", "ESCALON_C": 54, "RETIRO_C": 50, "APAGADO_C": 58, "CORROBORA_C": 50,
+           "CAUTELA_MIN": 30, "CICLO_S": 30, "CICLOS_CIEGA": 10, "DISCOS": ""}
+RANGOS = {"ESCALON_C": (20, 90), "RETIRO_C": (20, 90), "APAGADO_C": (20, 90), "CORROBORA_C": (20, 90),
+          "CAUTELA_MIN": (0, 240), "CICLO_S": (10, 60), "CICLOS_CIEGA": (2, 60)}
+UMBRALES = ("ESCALON_C", "RETIRO_C", "APAGADO_C", "CORROBORA_C")
+
+
+@dataclass
+class Config:
+    valores: dict = field(default_factory=lambda: dict(DEFECTO))
+    ok: bool = True
+    errores: tuple[str, ...] = ()
+
+    def __getitem__(self, clave: str):
+        return self.valores[clave]
+
+
+def leer_config(ruta: Path) -> Config:
+    """CLAVE=valor; un valor inválido usa el de fábrica (ACCION inválida = apagar) y marca ok=False.
+    Si los umbrales no son coherentes (RETIRO < ESCALON <= APAGADO, CORROBORA < APAGADO), los cuatro
+    vuelven a los de fábrica.
+    """
+    cfg = Config()
+    errores: list[str] = []
+    try:
+        lineas = ruta.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return cfg
+    except (OSError, UnicodeDecodeError) as e:
+        return Config(ok=False, errores=(f"no se pudo leer {ruta}: {e}",))
+    for n, linea in enumerate(lineas, 1):
+        linea = linea.split("#", 1)[0].strip()
+        if not linea:
+            continue
+        clave, sep, valor = linea.partition("=")
+        clave, valor = clave.strip(), valor.strip().strip('"').strip("'")
+        if not sep:
+            errores.append(f"línea {n}: falta '='")
+        elif clave not in DEFECTO:
+            errores.append(f"línea {n}: clave desconocida {clave!r}")
+        elif clave == "ACCION":
+            if valor in ("apagar", "simulacro"):
+                cfg.valores[clave] = valor
+            else:
+                errores.append(f"línea {n}: ACCION={valor!r} no es apagar ni simulacro (queda apagar)")
+        elif clave == "DISCOS":
+            rutas = valor.split()
+            if all(re.fullmatch(r"/dev/[A-Za-z0-9._:/-]+", r) and ".." not in r for r in rutas):
+                cfg.valores[clave] = " ".join(rutas)
+            else:
+                errores.append(f"línea {n}: DISCOS debe ser una lista de rutas /dev/...")
+        else:
+            minimo, maximo = RANGOS[clave]
+            if re.fullmatch(r"\d{1,3}", valor) and minimo <= int(valor) <= maximo:
+                cfg.valores[clave] = int(valor)
+            else:
+                errores.append(f"línea {n}: {clave}={valor!r} no es un entero entre {minimo} y {maximo}")
+    v = cfg.valores
+    if not (v["RETIRO_C"] < v["ESCALON_C"] <= v["APAGADO_C"] and v["CORROBORA_C"] < v["APAGADO_C"]):
+        errores.append("se exige RETIRO_C < ESCALON_C <= APAGADO_C y CORROBORA_C < APAGADO_C: "
+                       "los umbrales vuelven a los de fábrica")
+        for clave in UMBRALES:
+            v[clave] = DEFECTO[clave]
+    cfg.ok = not errores
+    cfg.errores = tuple(errores)
+    return cfg
+
+
+# --- discos (reimplementado aquí a propósito: la guardia no depende del controlador) -------------
+
+@dataclass(frozen=True)
+class Disco:
+    id: str
+    dev: str
+    ruta: str
+
+
+@dataclass(frozen=True)
+class Lectura:
+    tipo: str            # ok | standby | fallo
+    temp: int | None = None
+    motivo: str = ""
+
+
+def descubrir_discos(cfg: Config) -> list[Disco]:
+    if cfg["DISCOS"]:
+        return [Disco(Path(r).name, Path(os.path.realpath(r)).name, r) for r in cfg["DISCOS"].split()]
+    r = subprocess.run([LSBLK, "-J", "-d", "-o", "NAME,ROTA,TRAN"], capture_output=True, text=True,
+                       timeout=10, check=True)
+    porid: dict[str, Path] = {}
+    for p in sorted(BYID.glob("ata-*")):
+        if "-part" not in p.name:
+            porid.setdefault(Path(os.path.realpath(p)).name, p)
+    discos = []
+    for b in json.loads(r.stdout).get("blockdevices", []):
+        nombre = b.get("name")
+        if not isinstance(nombre, str) or not re.fullmatch(r"[a-z0-9]+", nombre):
+            continue
+        if b.get("rota") not in (True, 1, "1") or b.get("tran") not in ("sata", "ata"):
+            continue
+        ruta = porid.get(nombre)
+        discos.append(Disco(ruta.name if ruta else nombre, nombre, str(ruta or f"/dev/{nombre}")))
+    return discos
+
+
+def interpretar_smartctl(salida: str, rc: int) -> Lectura:
+    """Igual que el controlador: sólo temperature.current; standby = bit 1, sin tabla y power_mode
+    STANDBY/SLEEP; los bits de salud no invalidan."""
+    try:
+        j = json.loads(salida)
+    except ValueError:
+        return Lectura("fallo", motivo=f"JSON inválido (rc {rc})")
+    if not isinstance(j, dict):
+        return Lectura("fallo", motivo="JSON inesperado")
+    sc = j.get("smartctl")
+    estado = sc.get("exit_status") if isinstance(sc, dict) else None
+    if isinstance(estado, bool) or not isinstance(estado, int):
+        estado = rc
+    if estado & 0x1:
+        return Lectura("fallo", motivo=f"smartctl: error de línea de órdenes (exit {estado})")
+    atributos = j.get("ata_smart_attributes")
+    tabla = atributos.get("table") if isinstance(atributos, dict) else None
+    if estado & 0x2 and not (isinstance(tabla, list) and tabla):
+        modo = j.get("power_mode")
+        nombre = modo.get("name") if isinstance(modo, dict) else None
+        if isinstance(nombre, str) and ("STANDBY" in nombre.upper() or "SLEEP" in nombre.upper()):
+            return Lectura("standby")
+        return Lectura("fallo", motivo=f"smartctl no pudo leer el disco (exit {estado})")
+    temperatura = j.get("temperature")
+    actual = temperatura.get("current") if isinstance(temperatura, dict) else None
+    if isinstance(actual, bool) or not isinstance(actual, int):
+        return Lectura("fallo", motivo="sin temperature.current entero")
+    return Lectura("ok", actual)
+
+
+_COLGADOS: list[subprocess.Popen] = []
+
+
+def leer_discos(discos: list[Disco], timeout: float = SMARTCTL_TIMEOUT_S) -> dict[str, Lectura]:
+    for p in list(_COLGADOS):
+        if p.poll() is not None:
+            _COLGADOS.remove(p)
+    res: dict[str, Lectura] = {}
+    procesos = {}
+    for d in discos:
+        try:
+            procesos[d.id] = subprocess.Popen([SMARTCTL, "-j", "-n", "standby", "-A", d.ruta],
+                                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                              stdin=subprocess.DEVNULL, text=True)
+        except OSError as e:
+            res[d.id] = Lectura("fallo", motivo=f"no se pudo ejecutar smartctl: {e}")
+    limite = time.monotonic() + timeout
+    for ident, p in procesos.items():
+        try:
+            salida, _ = p.communicate(timeout=max(0.0, limite - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            p.kill()
+            try:
+                p.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                _COLGADOS.append(p)
+            res[ident] = Lectura("fallo", motivo=f"smartctl sin respuesta en {timeout:g} s")
+            continue
+        res[ident] = interpretar_smartctl(salida, p.returncode)
+    return res
+
+
+@dataclass
+class EstadoDisco:
+    base: int | None = None
+    descartes: int = 0
+    temp: int | None = None
+    sospechosa: bool = False
+    standby: bool = False
+
+
+def verosimilitud(ed: EstadoDisco, lectura: Lectura) -> None:
+    """Spec §3.1, reimplementada: fuera de 5–90 descartada; salto > 10 °C descartado; nueva base tras
+    dos descartes sólo si < 50; un salto a >= 50 es sospechoso (da aire y aísla, nunca apaga)."""
+    ed.temp, ed.sospechosa, ed.standby = None, False, False
+    if lectura.tipo == "standby":
+        ed.standby = True
+        return
+    t = lectura.temp
+    if lectura.tipo != "ok" or t is None or not 5 <= t <= 90:
+        return
+    if ed.base is None or abs(t - ed.base) <= 10:
+        ed.base, ed.descartes, ed.temp = t, 0, t
+        return
+    ed.descartes += 1
+    if t >= 50:
+        ed.temp, ed.sospechosa = t, True
+    elif ed.descartes > 2:
+        ed.base, ed.descartes, ed.temp = t, 0, t
+
+
+# --- estado persistente --------------------------------------------------------------------------
+
+def _escribir_atomico(ruta: Path, contenido: str, fsync: bool = False) -> None:
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=ruta.parent, prefix=f".{ruta.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(contenido)
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, ruta)
+        if fsync:
+            dfd = os.open(ruta.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def marcadores_reales() -> list[dict]:
+    """Marcadores de apagados reales (vigente y archivados), del más viejo al más nuevo."""
+    res = []
+    for p in sorted(ESTADO_DIR.glob(MARCADOR + "*")):
+        try:
+            m = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(m, dict) and isinstance(m.get("hora"), (int, float)) and not m.get("simulacro"):
+            res.append(m)
+    return sorted(res, key=lambda m: m["hora"])
+
+
+def arranque() -> float | None:
+    try:
+        for linea in PROC_STAT.read_text(encoding="ascii").splitlines():
+            if linea.startswith("btime "):
+                return float(linea.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def en_cautela(cfg: Config, ahora: float) -> bool:
+    """Primer arranque tras un apagado real de la guardia y dentro de CAUTELA_MIN.
+
+    El archivo `cautela` recuerda a qué apagado y a qué arranque se aplicó, para que un reinicio
+    normal posterior no vuelva a abrir la ventana.
+    """
+    reales = marcadores_reales()
+    btime = arranque()
+    if not reales or btime is None or reales[-1]["hora"] >= btime:
+        return False
+    hora = reales[-1]["hora"]
+    archivo = ESTADO_DIR / "cautela"
+    try:
+        previo = json.loads(archivo.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previo = None
+    if isinstance(previo, dict) and previo.get("marcador") == hora and previo.get("arranque") != btime:
+        return False
+    if not (isinstance(previo, dict) and previo.get("marcador") == hora):
+        _escribir_atomico(archivo, json.dumps({"marcador": hora, "arranque": btime}) + "\n")
+    return ahora < btime + cfg["CAUTELA_MIN"] * 60
+
+
+def manual_emergencia(c: str) -> Path:
+    return ESTADO_DIR / f"manual-emergencia-{c}"
+
+
+# --- sysfs ---------------------------------------------------------------------------------------
+
+def resolver_hwmon() -> Path | None:
+    for p in sorted(Path(r) for r in glob.glob(HWMON_GLOB)):
+        try:
+            if (p / "name").read_text(encoding="ascii").strip() == CHIP:
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def _leer_int(p: Path) -> int:
+    return int(p.read_text(encoding="ascii").strip())
+
+
+def _escribir_sysfs(p: Path, valor: int) -> None:
+    with open(p, "w", encoding="ascii") as f:
+        f.write(str(valor))
+
+
+# --- guardia -------------------------------------------------------------------------------------
+
+@dataclass
+class Guardia:
+    discos: dict = field(default_factory=dict)
+    historial: deque = field(default_factory=lambda: deque(maxlen=3))
+    ciclos_ciega: int = 0
+    aire: bool = False
+    estado: int = 0
+    tmax: int | None = None
+    t1: int | None = None
+    t2: int | None = None
+    ultima_lectura: float = 0.0
+    apagado_en: float | None = None
+    marcador_fallido: bool = False
+    errores: int = 0
+    escribible: dict = field(default_factory=lambda: {c: False for c in CANALES})
+    simulacro: bool = False
+
+
+def _no_sospechosas(snap: dict, excepto: str | None = None) -> list[int]:
+    return sorted((t for i, (t, s) in snap.items() if not s and i != excepto), reverse=True)
+
+
+def condicion_apagado(hist: deque, cfg: Config) -> tuple[str, int, int | None] | None:
+    """(disco, T1, T2) si un disco no sospechoso lleva 3 lecturas >= APAGADO_C y otro disco no
+    sospechoso marcó >= CORROBORA_C en al menos 2 de esas 3; si no, None."""
+    if len(hist) < 3:
+        return None
+    actual = hist[-1]
+    for ident, (t, sosp) in sorted(actual.items(), key=lambda kv: -kv[1][0]):
+        if sosp or t < cfg["APAGADO_C"]:
+            continue
+        corrobora = 0
+        for snap in hist:
+            e = snap.get(ident)
+            if e is None or e[1] or e[0] < cfg["APAGADO_C"]:
+                break
+            otros = _no_sospechosas(snap, ident)
+            if otros and otros[0] >= cfg["CORROBORA_C"]:
+                corrobora += 1
+        else:
+            if corrobora >= 2:
+                otros = _no_sospechosas(actual, ident)
+                return ident, t, (otros[0] if otros else None)
+    return None
+
+
+def disco_aislado(hist: deque, cfg: Config) -> str | None:
+    """Un disco (válido o sospechoso) >= APAGADO_C en las 3 últimas lecturas."""
+    if len(hist) < 3:
+        return None
+    for ident in hist[-1]:
+        if all(ident in snap and snap[ident][0] >= cfg["APAGADO_C"] for snap in hist):
+            return ident
+    return None
+
+
+def evaluar(g: Guardia, cfg: Config, discos: list[Disco], lecturas: dict[str, Lectura], ahora: float,
+            cautela: bool) -> tuple[str, int, int | None] | None:
+    """Actualiza g.estado y g.aire. Devuelve (disco, T1, T2) si toca apagar (estado 2)."""
+    vistos = {d.id for d in discos}
+    for d in discos:
+        verosimilitud(g.discos.setdefault(d.id, EstadoDisco()), lecturas.get(d.id, Lectura("fallo")))
+    for ident in list(g.discos):
+        if ident not in vistos:
+            del g.discos[ident]
+    snap = {i: (ed.temp, ed.sospechosa) for i, ed in g.discos.items() if ed.temp is not None}
+    g.historial.append(snap)
+    todos_standby = bool(g.discos) and all(ed.standby for ed in g.discos.values())
+    if snap:
+        g.ciclos_ciega = 0
+        g.ultima_lectura = ahora
+    elif todos_standby:
+        # Todos dormidos no es ceguera ni calor: reinicia la cuenta y retira el aire.
+        g.ciclos_ciega = 0
+        g.aire = False
+    else:
+        g.ciclos_ciega += 1
+    ciega = g.ciclos_ciega >= cfg["CICLOS_CIEGA"]
+    g.tmax = max((t for t, _ in snap.values()), default=None)
+    validas = _no_sospechosas(snap)
+    g.t1 = validas[0] if validas else None
+    g.t2 = validas[1] if len(validas) > 1 else None
+    if g.tmax is not None:
+        if g.tmax >= cfg["ESCALON_C"]:
+            g.aire = True
+        elif g.tmax < cfg["RETIRO_C"]:
+            g.aire = False
+    apagar = condicion_apagado(g.historial, cfg)
+    tres = len(validas) >= 3 and validas[2] >= cfg["CORROBORA_C"]
+    aislado = None if apagar else disco_aislado(g.historial, cfg)
+    if apagar and (not cautela or tres):
+        g.estado = 2
+    elif apagar:
+        g.estado = 5
+    elif aislado:
+        g.estado = 3
+    elif ciega:
+        g.estado = 4
+    elif cautela:
+        g.estado = 5
+    elif g.aire:
+        g.estado = 1
+    else:
+        g.estado = 0
+    if apagar or aislado or ciega:
+        g.aire = True
+    return apagar if g.estado == 2 else None
+
+
+def aplicar_aire(g: Guardia) -> None:
+    """255 en cada canal, por separado y sin que un fallo detenga al otro (spec §5.2, escalón 1)."""
+    raiz = resolver_hwmon()
+    for c in CANALES:
+        try:
+            if raiz is None:
+                g.escribible[c] = False
+                continue
+            auto_start, enable = raiz / f"{c}_auto_start", raiz / f"{c}_enable"
+            if auto_start.exists():
+                g.escribible[c] = True
+                if _leer_int(auto_start) != 255:
+                    _escribir_sysfs(auto_start, 255)
+                    log(f"{c}_auto_start=255")
+                if _leer_int(enable) != 2:
+                    _escribir_sysfs(enable, 2)
+                    log(f"{c}_enable=2")
+            else:
+                g.escribible[c] = False
+                if not enable.exists():
+                    log(f"{c}: sin auto_start ni enable; no se puede dar aire por este canal")
+                    continue
+                if _leer_int(enable) != 0:
+                    # Último recurso: 255 en manual. Se queda así hasta `reconocer` (N3-I1).
+                    _escribir_sysfs(enable, 0)
+                    log(f"{c}: falta {c}_auto_start; {c}_enable=0 (255 en manual, se queda así)")
+                if not manual_emergencia(c).exists():
+                    _escribir_atomico(manual_emergencia(c), f"{int(time.time())}\n")
+        except EXCEPCIONES as e:
+            g.errores += 1
+            log(f"{c}: no se pudo dar aire: {e}")
+
+
+def actualizar_escribible(g: Guardia) -> None:
+    raiz = resolver_hwmon()
+    for c in CANALES:
+        g.escribible[c] = raiz is not None and (raiz / f"{c}_auto_start").exists()
+
+
+def marcar_escalon(activo: bool, g: Guardia) -> None:
+    archivo = RUN / "escalon"
+    try:
+        if activo:
+            _escribir_atomico(archivo, f"{int(time.time())}\n")
+        elif archivo.exists():
+            archivo.unlink()
+            log("escalón retirado")
+    except EXCEPCIONES as e:
+        g.errores += 1
+        log(f"no se pudo {'refrescar' if activo else 'retirar'} {archivo}: {e}")
+
+
+def _orden(argv: list[str], g: Guardia) -> int:
+    try:
+        return subprocess.run(argv, check=False, timeout=30, stdin=subprocess.DEVNULL).returncode
+    except EXCEPCIONES as e:
+        g.errores += 1
+        log(f"{' '.join(argv)}: {e}")
+        return -1
+
+
+def apagar(g: Guardia, cfg: Config, disco: str, t1: int, t2: int | None, ahora: float) -> None:
+    """Marcador (con fsync) y métrica antes de nada; luego shutdown -> systemctl poweroff -> sysrq."""
+    if g.apagado_en is not None and ahora - g.apagado_en < REINTENTO_APAGADO_S:
+        return
+    g.apagado_en = ahora
+    simulacro = cfg["ACCION"] == "simulacro"
+    marcador = {"disco": disco, "t1": t1, "t2": t2, "hora": ahora,
+                "hora_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(ahora)),
+                "simulacro": simulacro}
+    try:
+        _escribir_atomico(ESTADO_DIR / MARCADOR, json.dumps(marcador) + "\n", fsync=True)
+        g.marcador_fallido = False
+    except EXCEPCIONES as e:
+        g.errores += 1
+        g.marcador_fallido = True
+        log(f"no se pudo escribir el marcador: {e}")
+    publicar(g, cfg, ahora)
+    mensaje = f"wtr-guardia-discos: {disco} a {t1} °C, segundo {t2} °C"
+    if simulacro:
+        log(f"SIMULACRO: {mensaje}; se ejecutaría {SHUTDOWN} -h +1, luego {SYSTEMCTL} poweroff, luego sysrq")
+        return
+    log(f"APAGADO: {mensaje}")
+    if _orden([SHUTDOWN, "-h", "+1", mensaje], g) == 0:
+        return
+    log(f"{SHUTDOWN} falló; {SYSTEMCTL} poweroff")
+    if _orden([SYSTEMCTL, "poweroff"], g) == 0:
+        return
+    log(f"{SYSTEMCTL} poweroff falló; sysrq s + o")
+    try:
+        with open(SYSRQ, "w", encoding="ascii") as f:
+            f.write("s")
+        time.sleep(SYSRQ_PAUSA_S)
+        with open(SYSRQ, "w", encoding="ascii") as f:
+            f.write("o")
+    except EXCEPCIONES as e:
+        g.errores += 1
+        log(f"sysrq: {e}")
+
+
+# --- métrica -------------------------------------------------------------------------------------
+
+def texto_metrica(g: Guardia, ahora: float) -> str:
+    reales = marcadores_reales()
+    pendiente = (ESTADO_DIR / MARCADOR).exists() or g.marcador_fallido
+    L = []
+
+    def serie(nombre, ayuda, filas):
+        L.append(f"# HELP {nombre} {ayuda}")
+        L.append(f"# TYPE {nombre} {'counter' if nombre.endswith('_total') else 'gauge'}")
+        for etiquetas, valor in filas:
+            et = ",".join(f'{k}="{v}"' for k, v in etiquetas.items())
+            L.append(f"{nombre}{{{et}}} {valor}" if et else f"{nombre} {valor}")
+
+    serie("wtr_guardia_discos_estado", "0 vigilando, 1 aire, 2 apagando, 3 disco aislado, 4 ciega, 5 cautela.",
+          [({}, g.estado)])
+    if g.tmax is not None:
+        serie("wtr_guardia_discos_temperatura_max_celsius", "Maximo de las lecturas validas o sospechosas.",
+              [({}, g.tmax)])
+    if g.t2 is not None:
+        serie("wtr_guardia_discos_segunda_celsius", "Segundo disco mas caliente sin lecturas sospechosas.",
+              [({}, g.t2)])
+    serie("wtr_guardia_discos_ultima_lectura_segundos", "Ultimo ciclo con alguna lectura (epoch).",
+          [({}, int(g.ultima_lectura))])
+    serie("wtr_guardia_discos_apagado_pendiente", "1 desde un apagado de la guardia hasta reconocer.",
+          [({}, int(pendiente))])
+    serie("wtr_guardia_discos_apagados_total", "Apagados reales de la guardia con marcador en disco.",
+          [({}, len(reales))])
+    serie("wtr_guardia_discos_ultimo_apagado_segundos", "Ultimo apagado real de la guardia (epoch, 0 = nunca).",
+          [({}, int(reales[-1]["hora"]) if reales else 0)])
+    serie("wtr_guardia_discos_canal_escribible", "1 si el canal tiene pwmN_auto_start.",
+          [({"canal": c}, int(g.escribible[c])) for c in CANALES])
+    serie("wtr_guardia_discos_manual_emergencia", "1 si el canal quedo en enable=0 de emergencia hasta reconocer.",
+          [({"canal": c}, int(manual_emergencia(c).exists())) for c in CANALES])
+    serie("wtr_guardia_discos_simulacro", "1 si ACCION=simulacro: la guardia no apaga.", [({}, int(g.simulacro))])
+    serie("wtr_guardia_discos_errores_total", "Acciones fallidas (escrituras, ordenes, lecturas de estado).",
+          [({}, g.errores)])
+    serie("wtr_guardia_discos_ultimo_ciclo_segundos", "Momento del ultimo ciclo completo (epoch).",
+          [({}, int(ahora))])
+    return "\n".join(L) + "\n"
+
+
+def publicar(g: Guardia, cfg: Config, ahora: float) -> None:
+    try:
+        _escribir_atomico(METRICA, texto_metrica(g, ahora))
+    except EXCEPCIONES as e:
+        g.errores += 1
+        log(f"no se pudo escribir {METRICA}: {e}")
+
+
+# --- ciclo y comandos ----------------------------------------------------------------------------
+
+def un_ciclo(g: Guardia, cfg: Config, ahora: float, discos: list[Disco] | None = None,
+             lecturas: dict[str, Lectura] | None = None) -> None:
+    g.simulacro = cfg["ACCION"] == "simulacro"
+    if discos is None:
+        try:
+            discos = descubrir_discos(cfg)
+        except EXCEPCIONES as e:
+            g.errores += 1
+            log(f"no se pudieron descubrir los discos: {e}")
+            discos = []
+    if lecturas is None:
+        lecturas = leer_discos(discos)
+    try:
+        cautela = en_cautela(cfg, ahora)
+    except EXCEPCIONES as e:
+        g.errores += 1
+        log(f"no se pudo evaluar la cautela: {e}")
+        cautela = False
+    antes = (g.estado, g.aire)
+    apagado = evaluar(g, cfg, discos, lecturas, ahora, cautela)
+    if (g.estado, g.aire) != antes:
+        log(f"estado {antes[0]} -> {g.estado}, aire {'sí' if g.aire else 'no'} "
+            f"(T máx {g.tmax}, T1 {g.t1}, T2 {g.t2})")
+    # El archivo de escalón va antes que el 255: el controlador nunca ve el 255 sin el escalón.
+    marcar_escalon(g.aire, g)
+    if g.aire:
+        aplicar_aire(g)
+    else:
+        actualizar_escribible(g)
+    if apagado:
+        apagar(g, cfg, *apagado, ahora)
+    publicar(g, cfg, ahora)
+
+
+def notificar(mensaje: str) -> None:
+    destino = os.environ.get("NOTIFY_SOCKET")
+    if not destino:
+        return
+    if destino.startswith("@"):
+        destino = "\0" + destino[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM | socket.SOCK_CLOEXEC) as s:
+            s.connect(destino)
+            s.sendall(mensaje.encode())
+    except OSError as e:
+        log(f"sd_notify: {e}")
+
+
+def cmd_vigilar(_args) -> int:
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    g = Guardia()
+    cfg = leer_config(CONF)
+    errores_previos: tuple[str, ...] = ()
+    notificar("READY=1")
+    log(f"vigilando: escalón {cfg['ESCALON_C']} °C, apagado {cfg['APAGADO_C']} °C corroborado con "
+        f"{cfg['CORROBORA_C']} °C, acción {cfg['ACCION']}")
+    while True:
+        inicio = time.monotonic()
+        try:
+            cfg = leer_config(CONF)
+            if cfg.errores != errores_previos:   # se registran al cambiar
+                log("config: " + ("; ".join(cfg.errores) or "sin errores"))
+                errores_previos = cfg.errores
+            un_ciclo(g, cfg, time.time())
+        except Exception:  # noqa: BLE001 - la guardia no muere; sin métrica fresca, alerta Caida
+            g.errores += 1
+            log("error inesperado en el ciclo:\n" + traceback.format_exc())
+        notificar(f"WATCHDOG=1\nSTATUS=estado {g.estado}, T máx {g.tmax}, T2 {g.t2}"
+                  + (", SIMULACRO" if g.simulacro else ""))
+        time.sleep(max(0.0, cfg["CICLO_S"] - (time.monotonic() - inicio)))
+
+
+def cmd_reconocer(_args) -> int:
+    marcador = ESTADO_DIR / MARCADOR
+    if marcador.exists():
+        destino = ESTADO_DIR / f"{MARCADOR}.reconocido-{time.strftime('%Y%m%dT%H%M%S')}"
+        marcador.rename(destino)
+        print(f"reconocer: apagado pendiente archivado en {destino} (apagado_pendiente=0)")
+    else:
+        print("reconocer: no hay apagado pendiente")
+    raiz = resolver_hwmon()
+    for c in CANALES:
+        if not manual_emergencia(c).exists():
+            continue
+        if raiz is not None and (raiz / f"{c}_auto_start").exists():
+            manual_emergencia(c).unlink()
+            print(f"reconocer: {c} manual_emergencia=0; {c}_auto_start existe, el controlador lo "
+                  "devuelve a automático (enable=2 y respaldo)")
+        else:
+            print(f"reconocer: {c} sigue sin {c}_auto_start: manual_emergencia queda en 1. Reconstruir el "
+                  "DKMS con el parche (README del driver) y volver a ejecutar reconocer")
+    return 0
+
+
+def cmd_probar_sandbox(_args) -> int:
+    """H2: smartctl, shutdown -k +1 --no-wall y shutdown -c, y escritura en los directorios propios."""
+    fallos = 0
+    cfg = leer_config(CONF)
+    try:
+        discos = descubrir_discos(cfg)
+        lec = leer_discos(discos[:1])
+        print(f"smartctl {discos[0].ruta}: {lec[discos[0].id]}")
+        fallos += lec[discos[0].id].tipo != "ok"
+    except (IndexError, *EXCEPCIONES) as e:
+        print(f"smartctl: FALLO {e}")
+        fallos += 1
+    for argv in ([SHUTDOWN, "-k", "+1", "--no-wall", "wtr-guardia-discos: prueba del sandbox"],
+                 [SHUTDOWN, "-c", "--no-wall"]):
+        rc = subprocess.run(argv, check=False, timeout=30).returncode
+        print(f"{' '.join(argv)}: rc {rc}")
+        fallos += rc != 0
+    for d in (RUN, ESTADO_DIR, METRICA.parent):
+        try:
+            _escribir_atomico(d / ".prueba-sandbox", "ok\n")
+            (d / ".prueba-sandbox").unlink()
+            print(f"escritura en {d}: ok")
+        except EXCEPCIONES as e:
+            print(f"escritura en {d}: FALLO {e}")
+            fallos += 1
+    print("probar-sandbox: " + ("ok" if not fallos else f"{fallos} fallos"))
+    return 0 if not fallos else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="wtr-guardia-discos", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("vigilar", help="bucle del servicio (por defecto)").set_defaults(fn=cmd_vigilar)
+    sub.add_parser("reconocer", help="archiva el apagado pendiente y limpia manual_emergencia"
+                   ).set_defaults(fn=cmd_reconocer)
+    sub.add_parser("probar-sandbox", help="smartctl y shutdown -k bajo el sandbox").set_defaults(
+        fn=cmd_probar_sandbox)
+    args = ap.parse_args(argv)
+    return getattr(args, "fn", cmd_vigilar)(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

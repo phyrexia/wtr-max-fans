@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Gabriel González Pineda <https://github.com/phyrexia>
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Ventiladores SYS y SATA del WTR MAX según la temperatura de los discos
+Documentation=https://github.com/phyrexia/wtr-max-fans
+After=systemd-modules-load.service local-fs.target time-sync.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/sbin/wtr-ventiladores correr
+# Corre en toda parada, también tras SIGKILL o el watchdog: deja SATA 153 / SYS 77 en automático.
+# No escribe si falta pwmN_auto_start en algún canal o si el escalón de la guardia está vigente.
+ExecStopPost=/usr/local/sbin/wtr-ventiladores respaldo
+WatchdogSec=180
+Restart=always
+RestartSec=30
+RuntimeDirectory=wtr-ventiladores
+# Root (sysfs del it87 y SG_IO para smartctl) con la superficie mínima (spec §7). Sin
+# ProtectKernelTunables: dejaría /sys de solo lectura.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/prometheus/node-exporter
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=block-sd rw
+CapabilityBoundingSet=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

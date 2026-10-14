@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Gabriel González Pineda <https://github.com/phyrexia>
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Guardia térmica de los discos del WTR MAX: 54 °C todo el aire, 58 °C apagado corroborado
+Documentation=https://github.com/phyrexia/wtr-max-fans
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/sbin/wtr-guardia-discos
+WatchdogSec=120
+Restart=always
+RestartSec=10
+RuntimeDirectory=wtr-guardia-discos
+StateDirectory=wtr-guardia-discos
+# Igual que el controlador más CAP_SYS_BOOT (shutdown por logind). Sin `wall`: el aviso lo emite
+# logind al programar el apagado, así que DevicePolicy=closed se mantiene.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/prometheus/node-exporter
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=block-sd rw
+CapabilityBoundingSet=CAP_SYS_RAWIO CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_SYS_BOOT
+
+[Install]
+WantedBy=multi-user.target
