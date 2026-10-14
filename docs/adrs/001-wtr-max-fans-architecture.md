@@ -209,7 +209,13 @@ step becomes active).
    "stable, and ≥ 100 rpm above the datasheet minimum minus its 20 % tolerance"; for the two Noctua models measured
    that is 24–26 % of the rated maximum, and the product does not know the datasheet. On the maintainer's unit it
    rejects `base` 51 (274 rpm ≈ 20 %) and admits 64 (511 rpm ≈ 37 %) and `disk-cage` 89 (708 rpm ≈ 37 %), the same
-   outcome as the private calibration.
+   outcome as the private calibration. **If none of the three candidates is admitted**, `min_night_floor[role] = none`
+   is stored and the controller clamps that role's night floor to the active profile's day `floor` (no night floor
+   reduction on that channel; the night curve still runs strictly below the day curve above 38 °C because
+   `night46 < day46`); the wizard says "the `<role>` fan does not run reliably below `<highest candidate>`: its night
+   floor will equal the day floor" and recommends a profile whose day floor is above the highest rejected candidate,
+   `status` shows `rear: night floor not admitted (tachometer unstable up to 102) → 115 (day floor)`, and the journal
+   logs it once per controller start.
 5. **Noise test** (only on PWM-controlled, managed channels): plays the **night curve value at 42 °C** of `quiet`,
    then `balanced`, then `cool` for 20 s each (§3.7 table; on the maintainer's unit 96 / 109 / 128 on the rear fans and
    58 → clamped 64 / 71 / 89 on the bottom fan), never below the admitted floor, asking after each "Acceptable at night
@@ -320,8 +326,10 @@ validation accepted silently cancelled the night mode without any metric noticin
 
 **Per-unit clamp.** Calibration's `min_night_floor[role]` (§3.4 step 4) raises any `night_floor` below it, up to and
 never above `floor`; the clamp is reported in `status` ("base: night floor 51 → 64, tachometer") and in the journal once
-per start. A clamp may make `night_floor == floor`; that is not the configuration error above, because `night46 <
-day46` still keeps the night curve strictly lower for every T > 38 °C, and `status` says why the floor is equal.
+per start. A clamp may make `night_floor == floor` — always when `min_night_floor = none` (no candidate admitted, §3.4
+step 4) — and that is not the configuration error above, because `night46 < day46` still keeps the night curve
+strictly lower for every T > 38 °C, and `status` says why the floor is equal. The clamp resolves against the active
+profile at runtime, so changing the profile never needs a recalibration.
 
 `balanced` is the maintainer's measured comfort point (rear 60 % and bottom 39 % by day; rear 50 % and bottom 30 % at
 46 °C by night; night floors 89 = 708 rpm and 64 = 511 rpm, tachometer-stable with margin; disks 35–43 °C). `quiet`
@@ -433,6 +441,7 @@ boot regardless.
 | Firmware re-arms its curve at runtime (not observed) | `prepare`/cycle corrects `enable` and `auto_point2_temp` drift (counter `corrections_total`); if drift persists > 10 corrections/h → alert "firmware fights the controller" and the status screen says so | **new** |
 | More or fewer fans, swapped headers | roles and PWM response from calibration; nothing assumed | **new** |
 | Stock DC fans | classified "does not respond"; guard only; the menu says control is unavailable and why | **new** |
+| PWM fan whose tachometer is unstable or too slow at every candidate night floor (§3.4 step 4) | `min_night_floor = none`; night floor clamped to the day floor of the active profile; night still lower above 38 °C through `night46 < day46`; the stopped-fan rule is unchanged (3 cycles at 0 rpm with applied ≥ floor), so a fan that cannot run at a profile's day floor is reported as stopped — the wizard therefore recommends a profile whose day floor is above the highest rejected candidate (`balanced` or `cool`); `status` and the journal say so | **new** |
 | 1 disk, or disks that report no `temperature.current` | shutdown degrades to alert; disks without the attribute are excluded; none left → blind | **new** |
 | Other disk models with different limits | thresholds are below every consulted specification (60 °C hard limit); `custom` allows lower, never higher than 58 for shutdown | **new** |
 | Another controller installed later (`fancontrol`) | drift corrections + alert as above; install refused up front | **new** |
