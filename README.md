@@ -60,34 +60,36 @@ The chip check is never overridable.
 - **Three profiles:** `quiet`, `balanced` and `cool`. The same temperature points and the same safety ceiling in all three. The table is in the next section.
 - **Night mode.** A local-time window, an optional later end on weekends, and an optional holiday file.
 - **Thermal guard.** A separate service that turns the fans to full air when a disk gets hot. Shutdown is off unless you enable it. See [Safety](#safety).
-- **Guided calibration.** Finds which fan is which, and whether each one responds to PWM. Restores the firmware values it touched when it is done.
-- **Noise test.** Plays each profile's night level and asks whether it is acceptable. It then proposes the loudest acceptable profile.
+- **Guided calibration.** Finds which fan is which, and whether each one responds to PWM. Restores the firmware values it touched when it is done. Each night floor is admitted per fan with the tachometer: a floor is kept only if the fan runs steadily and with margin, otherwise the next higher one is used.
+- **Noise test.** Plays each profile's night level at 42 °C and asks whether it is acceptable. It then proposes the loudest acceptable profile.
 - **Clean uninstall.** Restores the firmware values recorded at calibration, then removes the units, the module and the files it installed.
 - **Optional Prometheus metrics,** written only when the textfile collector directory already exists.
 - **Terminal menu** (whiptail) and a command line for scripts.
 
 ### Profiles
 
-Temperature points are the same for all profiles: the fans sit at the floor up to 38 °C, reach the day value at 46 °C, converge to the day value at 50 °C at night, and reach full speed (255) at 52 °C. Values are PWM from 0 to 255, with the percentage in brackets.
+Temperature points are the same for all profiles: the fans sit at the floor up to 38 °C, reach the day value at 46 °C, and reach full speed (255) at 52 °C. At night the curve starts from the night floor and reaches the night value at 46 °C. Below 50 °C it is always lower than the day curve, and from 50 °C it equals the day curve. Values are PWM from 0 to 255, with the percentage in brackets.
 
 | Setting | `quiet` | `balanced` | `cool` |
 |---|---|---|---|
 | Disk cage, floor | 102 (40 %) | 115 (45 %) | 128 (50 %) |
 | Disk cage, day at 46 °C | 128 (50 %) | 153 (60 %) | 191 (75 %) |
-| Disk cage, night at 46 °C | 115 (45 %) | 153 (60 %) | 153 (60 %) |
-| Base, floor | 77 (30 %) | 77 (30 %) | 100 (39 %) |
+| Disk cage, night floor | 76 (30 %) | 89 (35 %) | 102 (40 %) |
+| Disk cage, night at 46 °C | 115 (45 %) | 128 (50 %) | 153 (60 %) |
+| Base, floor | 64 (25 %) | 77 (30 %) | 100 (39 %) |
 | Base, day at 46 °C | 77 (30 %) | 100 (39 %) | 128 (50 %) |
-| Base, night at 46 °C | 77 (30 %) | 77 (30 %) | 100 (39 %) |
+| Base, night floor | 51 (20 %) | 64 (25 %) | 77 (30 %) |
+| Base, night at 46 °C | 64 (25 %) | 77 (30 %) | 100 (39 %) |
 
-`balanced` is the measured comfort point on one unit: rear fans at 60 %, bottom fan at 30 % at night, disks between 33 and 42 °C. `cool` is for warm rooms. The status screen suggests it when the 24-hour disk maximum goes above 46 °C.
+`balanced` is the measured comfort point on one unit: at night the rear fans run from 35 % to 50 % and the bottom fan from 25 % to 30 %, and the disks stay between 33 and 42 °C. `cool` is for warm rooms. The status screen suggests it when the 24-hour disk maximum goes above 46 °C.
 
-The base fan never goes below 30 % in any profile until a lower floor is verified with a tachometer. A `custom` profile lets you set every value in `config.ini`, within the safety rules.
+The base fan never goes below 20 % PWM in any profile. The lowest value, the `quiet` night floor of 20 %, is used only where calibration confirms it with a tachometer. A `custom` profile lets you set every value in `config.ini`, within the safety rules.
 
 The disks should stay in the 30–45 °C band over the long term. The NVMe drive should stay below 60 °C under sustained load. The CPU fan is never managed.
 
 ### Night mode
 
-Night mode uses the system's local time. Set `night_start` and `night_end` (for example 21:00 and 09:00). You can add a later end on weekends and a holiday file. No holiday file is shipped. An unreadable holiday file is treated as a normal day, so the fans run at day values and not less air.
+Night mode uses the system's local time. Set `night_start` and `night_end` (for example 21:00 and 09:00). You can add a later end on weekends and a holiday file. No holiday file is shipped. An unreadable holiday file is treated as a normal day, so the fans run at day values and not less air. A configuration where night equals day is an error: `status` shows it, and the curve falls back to the profile's factory values. To run the day curve all day, use `mode = day` or `night off`.
 
 ## Safety
 

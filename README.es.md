@@ -61,34 +61,36 @@ La comprobación del chip nunca se puede saltar.
 - **Tres perfiles:** `quiet`, `balanced` y `cool`. Los mismos puntos de temperatura y el mismo límite de seguridad en los tres. La tabla está en la siguiente sección.
 - **Modo nocturno.** Una franja horaria en hora local, un final opcional más tarde los fines de semana y un archivo opcional de festivos.
 - **Guardia térmica.** Un servicio separado que pone los ventiladores a máxima potencia cuando un disco se calienta. El apagado está desactivado salvo que lo actives. Ver [Seguridad](#seguridad).
-- **Calibración guiada.** Detecta qué ventilador es cuál y si responde a PWM. Al terminar, restaura los valores del firmware que tocó.
-- **Prueba de ruido.** Reproduce el nivel nocturno de cada perfil y pregunta si es aceptable. Después propone el perfil más potente que sea aceptable.
+- **Calibración guiada.** Detecta qué ventilador es cuál y si responde a PWM. Al terminar, restaura los valores del firmware que tocó. El mínimo nocturno se admite ventilador a ventilador con el tacómetro: se conserva un valor solo si el ventilador gira estable y con margen; si no, se usa el siguiente más alto.
+- **Prueba de ruido.** Reproduce el nivel nocturno de cada perfil a 42 °C y pregunta si es aceptable. Después propone el perfil más potente que sea aceptable.
 - **Desinstalación limpia.** Restaura los valores del firmware registrados en la calibración y luego elimina las unidades, el módulo y los archivos instalados.
 - **Métricas opcionales para Prometheus,** que solo se escriben si ya existe el directorio del collector de textfile.
 - **Menú de terminal** (whiptail) y línea de comandos para scripts.
 
 ### Perfiles
 
-Los puntos de temperatura son los mismos en todos los perfiles: los ventiladores se quedan en el mínimo hasta 38 °C, alcanzan el valor de día a 46 °C, convergen al valor de día a 50 °C de noche y llegan a máxima velocidad (255) a 52 °C. Los valores son PWM de 0 a 255, con el porcentaje entre paréntesis.
+Los puntos de temperatura son los mismos en todos los perfiles: los ventiladores se quedan en el mínimo hasta 38 °C, alcanzan el valor de día a 46 °C y llegan a máxima velocidad (255) a 52 °C. De noche, la curva parte del mínimo nocturno y alcanza el valor de noche a 46 °C. Por debajo de 50 °C siempre queda por debajo de la curva de día, y a partir de 50 °C coincide con ella. Los valores son PWM de 0 a 255, con el porcentaje entre paréntesis.
 
 | Parámetro | `quiet` | `balanced` | `cool` |
 |---|---|---|---|
 | Jaula de discos, mínimo | 102 (40 %) | 115 (45 %) | 128 (50 %) |
 | Jaula de discos, día a 46 °C | 128 (50 %) | 153 (60 %) | 191 (75 %) |
-| Jaula de discos, noche a 46 °C | 115 (45 %) | 153 (60 %) | 153 (60 %) |
-| Base, mínimo | 77 (30 %) | 77 (30 %) | 100 (39 %) |
+| Jaula de discos, mínimo nocturno | 76 (30 %) | 89 (35 %) | 102 (40 %) |
+| Jaula de discos, noche a 46 °C | 115 (45 %) | 128 (50 %) | 153 (60 %) |
+| Base, mínimo | 64 (25 %) | 77 (30 %) | 100 (39 %) |
 | Base, día a 46 °C | 77 (30 %) | 100 (39 %) | 128 (50 %) |
-| Base, noche a 46 °C | 77 (30 %) | 77 (30 %) | 100 (39 %) |
+| Base, mínimo nocturno | 51 (20 %) | 64 (25 %) | 77 (30 %) |
+| Base, noche a 46 °C | 64 (25 %) | 77 (30 %) | 100 (39 %) |
 
-`balanced` es el punto de confort medido en una unidad: ventiladores traseros al 60 %, ventilador inferior al 30 % de noche, discos entre 33 y 42 °C. `cool` es para habitaciones calurosas. La pantalla de estado sugiere este perfil cuando el máximo de los discos en 24 horas supera los 46 °C.
+`balanced` es el punto de confort medido en una unidad: de noche, los ventiladores traseros van del 35 % al 50 % y el inferior del 25 % al 30 %, y los discos se mantienen entre 33 y 42 °C. `cool` es para habitaciones calurosas. La pantalla de estado sugiere este perfil cuando el máximo de los discos en 24 horas supera los 46 °C.
 
-El ventilador base nunca baja del 30 % en ningún perfil hasta que se verifique un mínimo más bajo con tacómetro. El perfil `custom` te permite fijar cada valor en `config.ini`, dentro de las reglas de seguridad.
+El ventilador base nunca baja del 20 % de PWM en ningún perfil. Su valor más bajo, el mínimo nocturno de 20 % de `quiet`, solo se usa si la calibración lo confirma con tacómetro. El perfil `custom` te permite fijar cada valor en `config.ini`, dentro de las reglas de seguridad.
 
 A largo plazo, los discos deberían mantenerse entre 30 y 45 °C. El NVMe debería mantenerse por debajo de 60 °C con carga sostenida. El ventilador de la CPU nunca se controla.
 
 ### Modo nocturno
 
-El modo nocturno usa la hora local del sistema. Configura `night_start` y `night_end` (por ejemplo 21:00 y 09:00). Puedes añadir un final más tarde los fines de semana y un archivo de festivos. No se incluye ningún archivo de festivos. Si el archivo de festivos no se puede leer, se trata como un día normal, así que los ventiladores usan los valores de día y no mueven menos aire.
+El modo nocturno usa la hora local del sistema. Configura `night_start` y `night_end` (por ejemplo 21:00 y 09:00). Puedes añadir un final más tarde los fines de semana y un archivo de festivos. No se incluye ningún archivo de festivos. Si el archivo de festivos no se puede leer, se trata como un día normal, así que los ventiladores usan los valores de día y no mueven menos aire. Una configuración en la que la noche es igual al día es un error: `status` lo muestra y la curva vuelve a los valores de fábrica del perfil. Para tener la curva de día todo el tiempo, usa `mode = day` o `night off`.
 
 ## Seguridad
 
