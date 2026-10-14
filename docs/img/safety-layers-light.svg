@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="546" viewBox="0 0 1200 546" role="img" aria-labelledby="t">
+<title id="t">wtr-max-fans safety layers: what happens when each piece fails</title>
+<style>text{font-family:system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;}</style>
+<rect width="1200" height="546" fill="#ffffff"/>
+<text x="24" y="36" font-size="22" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Safety layers: every failure moves towards more air, never less</text>
+<text x="24" y="60" font-size="14" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >What happens when each piece fails. The controller and the guard are separate processes with separate restart policies.</text>
+<rect x="24" y="92" width="1152" height="58" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="24" y="92" width="8" height="58" rx="4" fill="#d03b3b"/>
+<text x="44" y="117" font-size="14" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Disks keep warming past 52 °C</text>
+<path d="M 44 128 l 10 0" stroke="#d03b3b" stroke-width="2"/>
+<text x="62" y="132" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Both curves are already at 255 (100 %) from 52 °C: the controller has nothing left to add.</text>
+<rect x="24" y="160" width="1152" height="58" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="24" y="160" width="8" height="58" rx="4" fill="#d03b3b"/>
+<text x="44" y="185" font-size="14" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >A disk reads 54 °C</text>
+<path d="M 44 196 l 10 0" stroke="#d03b3b" stroke-width="2"/>
+<text x="62" y="200" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >wtr-guardia-discos, a separate process on a 30 s cycle, writes 255 to both channels itself</text>
+<text x="62" y="216" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >and tells the controller to stand back. Released once every disk is below 50 °C.</text>
+<rect x="24" y="228" width="1152" height="58" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="24" y="228" width="8" height="58" rx="4" fill="#d03b3b"/>
+<text x="44" y="253" font-size="14" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >A disk reads ≥ 58 °C three times in a row and a second disk ≥ 50 °C</text>
+<path d="M 44 264 l 10 0" stroke="#d03b3b" stroke-width="2"/>
+<text x="62" y="268" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Clean shutdown: shutdown -h +1 (one minute to cancel), then systemctl poweroff, then sysrq.</text>
+<text x="62" y="284" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >One hot disk alone, or any suspicious reading: full air plus a critical alert, no shutdown.</text>
+<rect x="24" y="296" width="1152" height="58" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="24" y="296" width="8" height="58" rx="4" fill="#2a78d6"/>
+<text x="44" y="321" font-size="14" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >The controller crashes, hangs or is killed</text>
+<path d="M 44 332 l 10 0" stroke="#2a78d6" stroke-width="2"/>
+<text x="62" y="336" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >The chip stays in automatic mode with the last Start PWM (never below the floor).</text>
+<text x="62" y="352" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >ExecStopPost writes the backup 153 / 77 within seconds; systemd restarts it after 30 s.</text>
+<rect x="24" y="364" width="1152" height="58" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="24" y="364" width="8" height="58" rx="4" fill="#9a6700"/>
+<text x="44" y="389" font-size="14" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >The driver is not loaded, or the patch is missing (new kernel)</text>
+<path d="M 44 400 l 10 0" stroke="#9a6700" stroke-width="2"/>
+<text x="62" y="404" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >The controller exits with code 78 and writes nothing. The guard keeps watching; its last resort is</text>
+<text x="62" y="420" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >pwmN_enable=0 (100 % in manual mode), sticky until wtr-guardia-discos reconocer after a rebuild.</text>
+<rect x="24" y="432" width="1152" height="58" rx="10" fill="#f6f8fa" stroke="#d0d7de"/>
+<rect x="24" y="432" width="8" height="58" rx="4" fill="#6e7781"/>
+<text x="44" y="457" font-size="14" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >No module and no service (for example a reboot into a kernel without it)</text>
+<path d="M 44 468 l 10 0" stroke="#6e7781" stroke-width="2"/>
+<text x="62" y="472" font-size="12.5" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >The firmware curve applies. Recommended BIOS fallback: rear Start PWM 60 %, base 30 %.</text>
+<text x="24" y="530" font-size="12" font-weight="normal" text-anchor="start" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Thresholds 50 / 52 / 54 / 58 °C sit below the disks' 60 °C specification limit. The CPU fan and the 2-wire MEM header are never touched.</text>
+</svg>

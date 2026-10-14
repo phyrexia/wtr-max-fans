@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="t">
+<title id="t">wtr-max-fans v0 night schedule: 21:00 to 09:00 on weekdays, to 10:00 on weekends and Madrid holidays</title>
+<style>text{font-family:system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;}</style>
+<rect width="1200" height="400" fill="#ffffff"/>
+<text x="24" y="36" font-size="22" font-weight="700" text-anchor="start" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >When is it night? (v0: fixed calendar, Europe/Madrid)</text>
+<text x="24" y="60" font-size="14" font-weight="normal" text-anchor="start" fill="#57606a" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Evaluated every cycle. The night curve starts at 21:00; the morning end depends on the day that is starting.</text>
+<text x="214" y="125" font-size="14" font-weight="600" text-anchor="end" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Weekday morning</text>
+<rect x="230.0" y="100" width="337.5" height="38" rx="6" fill="#6250d6"/>
+<rect x="569.5" y="100" width="446.0" height="38" rx="6" fill="#eb6834"/>
+<rect x="1019.5" y="100" width="110.5" height="38" rx="6" fill="#6250d6"/>
+<text x="398.75" y="124" font-size="13" font-weight="700" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >night until 09:00</text>
+<text x="792.5" y="124" font-size="13" font-weight="700" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >day curve</text>
+<text x="1073.75" y="124" font-size="13" font-weight="700" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >night</text>
+<text x="214" y="181" font-size="14" font-weight="600" text-anchor="end" fill="#1f2328" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Weekend or Madrid holiday</text>
+<rect x="230.0" y="156" width="375.0" height="38" rx="6" fill="#6250d6"/>
+<rect x="607.0" y="156" width="408.5" height="38" rx="6" fill="#eb6834"/>
+<rect x="1019.5" y="156" width="110.5" height="38" rx="6" fill="#6250d6"/>
+<text x="417.5" y="180" font-size="13" font-weight="700" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >night until 10:00</text>
+<text x="811.25" y="180" font-size="13" font-weight="700" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >day curve</text>
+<text x="1073.75" y="180" font-size="13" font-weight="700" text-anchor="middle" fill="#ffffff" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >night</text>
+<line x1="230.0" y1="218" x2="230.0" y2="224" stroke="#afb8c1"/>
+<text x="230.0" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">00:00</text>
+<line x1="342.5" y1="218" x2="342.5" y2="224" stroke="#afb8c1"/>
+<text x="342.5" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">03:00</text>
+<line x1="455.0" y1="218" x2="455.0" y2="224" stroke="#afb8c1"/>
+<text x="455.0" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">06:00</text>
+<line x1="567.5" y1="218" x2="567.5" y2="224" stroke="#afb8c1"/>
+<text x="567.5" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">09:00</text>
+<line x1="680.0" y1="218" x2="680.0" y2="224" stroke="#afb8c1"/>
+<text x="680.0" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">12:00</text>
+<line x1="792.5" y1="218" x2="792.5" y2="224" stroke="#afb8c1"/>
+<text x="792.5" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">15:00</text>
+<line x1="905.0" y1="218" x2="905.0" y2="224" stroke="#afb8c1"/>
+<text x="905.0" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">18:00</text>
+<line x1="1017.5" y1="218" x2="1017.5" y2="224" stroke="#afb8c1"/>
+<text x="1017.5" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">21:00</text>
+<line x1="1130.0" y1="218" x2="1130.0" y2="224" stroke="#afb8c1"/>
+<text x="1130.0" y="238" font-size="11.5" font-weight="normal" text-anchor="middle" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-variant-numeric="tabular-nums">24:00</text>
+<line x1="230.0" y1="218" x2="1130.0" y2="218" stroke="#afb8c1"/>
+<rect x="625.0" y="264" width="505" height="26" rx="12" fill="#e9e6fb" stroke="#6250d6" stroke-width="1"/><text x="877.5" y="281.5" font-size="12.5" font-weight="600" text-anchor="middle" fill="#6250d6" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >21:00 → night: −4 PWM per minute, on the night curve within ≈ 9 min</text>
+<path d="M 1017.5 218 v 44" stroke="#6250d6" stroke-width="1.5" stroke-dasharray="3 3"/>
+<rect x="507.5" y="302" width="549" height="26" rx="12" fill="#fde7dc" stroke="#eb6834" stroke-width="1"/><text x="782.0" y="319.5" font-size="12.5" font-weight="600" text-anchor="middle" fill="#eb6834" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >09:00 / 10:00 → day: +20 PWM per minute, back on the day curve in 1–2 min</text>
+<path d="M 567.5 218 v 82" stroke="#eb6834" stroke-width="1.5" stroke-dasharray="3 3"/>
+<text x="24" y="364" font-size="12" font-weight="normal" text-anchor="start" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Holidays come from festivos-madrid.txt (Madrid, Spain). MODO=dia runs the day curve 24 h; MODO=noche forces the night curve.</text>
+<text x="24" y="382" font-size="12" font-weight="normal" text-anchor="start" fill="#6e7781" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" >Another time zone or holiday list needs an edit in the script and the file (v0 limitation; configurable in the planned v1).</text>
+</svg>
