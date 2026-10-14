@@ -1,6 +1,6 @@
 # ADR 001 — `wtr-max-fans`: architecture of the public fan-control package for the AOOSTAR WTR MAX
 
-- **Status**: proposed
+- **Status**: direction approved by the maintainer on 2026-10-14; adversarial audit (phase 3) pending
 - **Date**: 2026-10-13
 - **Profile**: `feature` (delivery-lifecycle phase 2)
 - **Grill**: `docs/specs/2026-10-13-wtr-max-fans-grill.md`
@@ -71,9 +71,9 @@ submission.
 | D11 | **Install = `git clone` (tagged release) + `sudo ./install.sh`**; `install.sh` installs apt prerequisites and hands over to the Python installer; `--check` is read-only; the same command upgrades. | Local copy, reviewable, resumable, auditable version; no `curl \| bash`. |
 | D12 | **Uninstall restores the firmware values recorded at calibration** (Start temperature, Start PWM per channel), removes units, files, DKMS module and `modules-load.d` entry; keeps `/etc/wtr-max-fans/` unless `--purge`. | "Leaves the firmware in charge" has to mean the firmware's own numbers, not constants. |
 | D13 | **Refuse to coexist**: another fan controller unit active (`fancontrol`, `fan2go`, the maintainer's legacy units) or another DKMS package building `it87` ⇒ stop with the migration text. | Two writers on one register oscillate; the migration is explicit. |
-| D14 | **Tests**: pytest with a fake system root (sysfs, `/etc`, `/run`, `/var`, fake `smartctl`/`systemctl`/`shutdown`/`sendmail` on `PATH`), run remotely on `qf-test`; GitHub Actions CI: shellcheck, pytest on Python 3.11 and 3.13, `promtool` for `contrib/`, driver compile against Debian 12, Debian 13 and current PVE headers in containers, `install.sh --check` must exit 3 in a container. | Nothing in CI needs the chip; the chip-dependent part is compiled, not run. |
+| D14 | **Tests**: pytest with a fake system root (sysfs, `/etc`, `/run`, `/var`, fake `smartctl`/`systemctl`/`shutdown`/`sendmail` on `PATH`), run on the maintainer's remote test runner; GitHub Actions CI: shellcheck, pytest on Python 3.11 and 3.13, `promtool` for `contrib/`, driver compile against Debian 12, Debian 13 and current PVE headers in containers, `install.sh --check` must exit 3 in a container. | Nothing in CI needs the chip; the chip-dependent part is compiled, not run. |
 | D15 | **Hardware test = the migration of the maintainer's unit** at `v1.0.0-rc.1`, with a guard-overlap sequence and a two-minute rollback to the private installer. | The only WTR MAX we have; the private deployment is the rollback. |
-| D16 | **SemVer, signed tags, GitHub Releases with `SHA256SUMS`, `CHANGELOG.md`**; `README.md` + `README.es.md` with menu screenshots, a Safety section and an Uninstall section; `driver/` GPL-2.0-only, the rest MIT, REUSE layout. | Public repo hygiene from the first public commit. |
+| D16 | **SemVer, signed tags, GitHub Releases with `SHA256SUMS`, `CHANGELOG.md`**; `README.md` + `README.es.md` with menu screenshots, a Safety section and an Uninstall section; `driver/` patch GPL-2.0-only, the rest Apache-2.0 with a `NOTICE` file, REUSE layout. | Public repo hygiene from the first public commit. |
 
 ### 3.1 Repository layout (to be created)
 
@@ -119,8 +119,9 @@ wtr-max-fans/
 │   ├── analysis/                 # audit receipts
 │   └── img/                      # menu screenshots
 ├── .github/workflows/ci.yml
-├── LICENSES/                     # MIT.txt, GPL-2.0-only.txt (REUSE)
-├── LICENSE                       # MIT (everything outside driver/)
+├── LICENSES/                     # Apache-2.0.txt, GPL-2.0-only.txt (REUSE)
+├── LICENSE                       # Apache-2.0 (everything except the driver patch and upstream/)
+├── NOTICE                        # Apache-2.0 §4(d) notice, licence split, trademark notice
 ├── README.md, README.es.md, CHANGELOG.md, SECURITY.md, CONTRIBUTING.md, VERSION
 └── tasks/todo.md, tasks/lessons.md
 ```
@@ -493,9 +494,8 @@ every integer T in 30–49 and equal from 50** on every profile; every night ram
 and `night_floor = floor` rejected with the `mode = day` message; day → night transition on both roles at ≤ 4/cycle
 and night → day at ≤ 20/cycle; shutdown degrade with one disk; `alert` default performs no power action;
 firmware snapshot restore on uninstall; unreadable holidays → day; INI round-trip through the menu's writers;
-non-TTY refusal; `report` bundle contents. Run on the remote executor, never on the Mac:
-`qf-test up --generic --auto --allow-qf-infra` → `qf-test exec -- python3 -m pytest -q tests` → `qf-test artifacts`
-→ `qf-test down`.
+non-TTY refusal; `report` bundle contents. The maintainer runs them on a remote test runner (an isolated,
+disposable environment), never on a workstation: `python3 -m pytest -q tests`, then collect the artifacts.
 
 **CI (GitHub Actions, public).** Jobs on push and pull request: `shellcheck install.sh`; `pytest` on Python 3.11 and
 3.13 (Debian 12 and 13); `promtool check rules` + `promtool test rules` on `contrib/prometheus/`; **driver compile** in
@@ -533,7 +533,7 @@ before owners update.
   OS, PWM fans); **Safety** (what it never does, what happens when it dies, protection default and the shutdown rule,
   the firmware fallback); install; calibration with screenshots (`docs/img/`); profiles and night mode; uninstall;
   troubleshooting with the exit codes; metrics; development and tests; licence and trademark notice.
-- Licences: `driver/` GPL-2.0-only; everything else MIT; `LICENSES/` + SPDX headers per file (REUSE); the README's
+- Licences: `driver/` patch and vendored source GPL-2.0-only; everything else Apache-2.0 with `NOTICE`; `LICENSES/` + SPDX headers per file (REUSE); the README's
   licence section explains the split in two sentences.
 - Migration text for the maintainer's legacy units lives in `docs/` and is printed by gate G4.
 - Issue template requires the `report` bundle; `SECURITY.md`; `CONTRIBUTING.md` (tests must pass remotely and in CI;
@@ -588,7 +588,7 @@ before owners update.
 
 ## 7. Status
 
-**proposed** — awaiting the Owner's direction approval (phase 2 exit) and the adversarial audit (phase 3).
+**Direction approved** by the maintainer on 2026-10-14 (phase 2 exit); the adversarial audit (phase 3) is pending.
 
 History:
 
@@ -596,3 +596,7 @@ History:
 - 2026-10-14: night curves made strictly lower than day after the maintainer's first night showed no audible change
   (private spec rev. 5.1): night floor per role × profile, strict invariants, convergence rule in the smoothing law,
   tachometer floor admission in calibration, `pwm_target_day` and `config_ok` observability, eighth contrib alert.
+- 2026-10-14: v0 (the maintainer's working deployment) published as-is under `v0/`, with the driver patch in
+  `driver/` and the alert rules in `contrib/prometheus/`.
+- 2026-10-14: licence decided by the maintainer: Apache-2.0 with a `NOTICE` file for everything except the driver
+  patch, which stays GPL-2.0-only (it was MIT in the first draft).

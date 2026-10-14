@@ -117,6 +117,8 @@ stop the disk-cage fans entirely while the disks pass 50 °C.
   driver has no choice; MIT lets TrueNAS/Unraid plugin authors embed the controller and the calibration logic without
   licence friction, which is the most likely route to the systems v1 leaves out; the two parts are separate processes
   that only share sysfs, so there is no derivative relation. SPDX headers per file and a `LICENSES/` directory (REUSE).
+  *Superseded on 2026-10-14 by the maintainer's decision: Apache-2.0 with a `NOTICE` file instead of MIT; the driver
+  patch stays GPL-2.0-only (ADR 001, §7).*
 - **Language**: code, config keys, metrics, menu and `README.md` in English; `README.es.md` as a maintained mirror.
 
 ## Out of scope (explicit)
